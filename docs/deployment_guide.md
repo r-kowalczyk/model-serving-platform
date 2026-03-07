@@ -1,3 +1,4 @@
+````markdown
 # Azure Container Apps deployment guide for `model-serving-platform`
 
 This guide documents the end-to-end deployment of the `model-serving-platform` GraphSAGE API to Azure Container Apps, including the issues encountered, how they were diagnosed, and the final working deployment sequence.
@@ -231,3 +232,448 @@ IMAGE_TAG="v1"
 STORAGE_ACCOUNT="stmodelservingplat"
 FILE_SHARE="graphsagebundle"
 STORAGE_MOUNT_NAME="graphsagebundlemount"
+````
+
+---
+
+### 1. Log in and prepare Azure CLI
+
+This authenticates the CLI, installs the ACA extension, and registers the provider namespaces needed for Container Apps, Log Analytics, ACR, and Storage. Provider registration is required at the subscription level before those resource types can be created. ([Microsoft Learn][1])
+
+```bash
+az login
+az extension add --name containerapp --upgrade
+
+az provider register --namespace Microsoft.App
+az provider register --namespace Microsoft.OperationalInsights
+az provider register --namespace Microsoft.ContainerRegistry
+az provider register --namespace Microsoft.Storage
+```
+
+Optionally verify registration:
+
+```bash
+az provider show -n Microsoft.App --query registrationState -o tsv
+az provider show -n Microsoft.OperationalInsights --query registrationState -o tsv
+az provider show -n Microsoft.ContainerRegistry --query registrationState -o tsv
+az provider show -n Microsoft.Storage --query registrationState -o tsv
+```
+
+All should eventually return:
+
+```bash
+Registered
+```
+
+---
+
+### 2. Create the resource group
+
+This creates the resource group that contains all deployment resources. ACA quickstarts use the same pattern. ([Microsoft Learn][2])
+
+```bash
+az group create \
+  --name "$RESOURCE_GROUP" \
+  --location "$LOCATION"
+```
+
+---
+
+### 3. Create Azure Container Registry
+
+This creates a private image registry for the API image. Azure Container Registry is Microsoft’s private registry service for images and related artefacts. ([Microsoft Learn][3])
+
+```bash
+az acr create \
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$ACR_NAME" \
+  --sku Basic
+```
+
+Get the registry login server and log in Docker:
+
+```bash
+ACR_LOGIN_SERVER=$(az acr show \
+  --name "$ACR_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query loginServer \
+  -o tsv)
+
+az acr login --name "$ACR_NAME"
+```
+
+Azure documents `az acr login` as the recommended CLI-based registry auth flow. ([Microsoft Learn][4])
+
+---
+
+### 4. Enable ACR admin user and fetch credentials
+
+For a first deployment, using the registry’s admin credentials is the simplest way to let ACA pull a private image. The docs for deploying existing images to ACA support private registry username/password auth. ([Microsoft Learn][2])
+
+```bash
+az acr update -n "$ACR_NAME" --admin-enabled true
+
+ACR_USERNAME=$(az acr credential show \
+  --name "$ACR_NAME" \
+  --query username \
+  -o tsv)
+
+ACR_PASSWORD=$(az acr credential show \
+  --name "$ACR_NAME" \
+  --query "passwords[0].value" \
+  -o tsv)
+```
+
+---
+
+### 5. Build and push the Docker image for `linux/amd64`
+
+This is essential on macOS. ACA expects a Linux-compatible image, and your first failure came from pushing a tag without an amd64 variant. Buildx fixes that by explicitly building for `linux/amd64`. ([Microsoft Learn][2])
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG" \
+  --push .
+```
+
+Optional verification:
+
+```bash
+docker buildx imagetools inspect "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+```
+
+You should see a `linux/amd64` manifest listed.
+
+---
+
+### 6. Create the ACA environment
+
+This creates the ACA environment that will contain the Container App and the linked environment-level storage. ([Microsoft Learn][2])
+
+```bash
+az containerapp env create \
+  --name "$ACA_ENV" \
+  --resource-group "$RESOURCE_GROUP" \
+  --location "$LOCATION"
+```
+
+---
+
+### 7. Create the storage account
+
+This creates the storage account that will hold the Azure Files share. Azure Files provides managed network file shares over SMB/NFS. ([Microsoft Learn][5])
+
+```bash
+az storage account create \
+  --name "$STORAGE_ACCOUNT" \
+  --resource-group "$RESOURCE_GROUP" \
+  --location "$LOCATION" \
+  --sku Standard_LRS
+```
+
+---
+
+### 8. Create the Azure Files share
+
+This creates the file share that stores the GraphSAGE serving bundle. ([Microsoft Learn][5])
+
+```bash
+az storage share-rm create \
+  --resource-group "$RESOURCE_GROUP" \
+  --storage-account "$STORAGE_ACCOUNT" \
+  --name "$FILE_SHARE"
+```
+
+---
+
+### 9. Get the storage key
+
+This retrieves the storage account key, which is needed both for uploading files and for linking the share to ACA. ACA Azure Files mounts use storage account credentials. ([Microsoft Learn][6])
+
+```bash
+STORAGE_KEY=$(az storage account keys list \
+  --resource-group "$RESOURCE_GROUP" \
+  --account-name "$STORAGE_ACCOUNT" \
+  --query "[0].value" \
+  -o tsv)
+```
+
+---
+
+### 10. Upload the serving bundle to Azure Files
+
+This uploads the local GraphSAGE bundle directory into the Azure Files share. The bundle should contain the serving artefacts at the root of the share. ([Microsoft Learn][6])
+
+```bash
+BUNDLE_DIR="/absolute/path/to/serving_bundle"
+
+az storage file upload-batch \
+  --account-name "$STORAGE_ACCOUNT" \
+  --account-key "$STORAGE_KEY" \
+  --destination "$FILE_SHARE" \
+  --source "$BUNDLE_DIR"
+```
+
+Verify the uploaded files:
+
+```bash
+az storage file list \
+  --account-name "$STORAGE_ACCOUNT" \
+  --account-key "$STORAGE_KEY" \
+  --share-name "$FILE_SHARE" \
+  --output table
+```
+
+You should see the bundle files at the root, for example:
+
+* `manifest.json`
+* `model_state.pt`
+* `node_features.npy`
+* `edge_index.npy`
+
+---
+
+### 11. Link the file share to the ACA environment
+
+This registers the Azure Files share under an ACA environment storage name. This does **not** mount it into the app yet. It only makes it available for the app template to reference later. ([Microsoft Learn][6])
+
+```bash
+az containerapp env storage set \
+  --access-mode ReadWrite \
+  --azure-file-account-name "$STORAGE_ACCOUNT" \
+  --azure-file-account-key "$STORAGE_KEY" \
+  --azure-file-share-name "$FILE_SHARE" \
+  --storage-name "$STORAGE_MOUNT_NAME" \
+  --name "$ACA_ENV" \
+  --resource-group "$RESOURCE_GROUP"
+```
+
+---
+
+### 12. Create the Container App YAML
+
+This YAML does the key app-level wiring:
+
+* uses the private ACR image
+* sets the env vars the app actually reads
+* mounts the Azure Files share into `/mnt/model-bundle`
+* exposes port 8000 externally
+* gives the app enough CPU/memory to complete startup
+
+The Azure Files mount works because the storage name in `volumes` matches the storage previously attached to the ACA environment. ([Microsoft Learn][6])
+
+```bash
+cat > app.yaml <<EOF
+location: uksouth
+properties:
+  managedEnvironmentId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$ACA_ENV
+  configuration:
+    ingress:
+      external: true
+      targetPort: 8000
+      transport: auto
+    registries:
+      - server: $ACR_LOGIN_SERVER
+        username: $ACR_USERNAME
+        passwordSecretRef: acr-password
+    secrets:
+      - name: acr-password
+        value: $ACR_PASSWORD
+  template:
+    containers:
+      - name: graphsage-serving-api
+        image: $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG
+        env:
+          - name: BUNDLE_PATH
+            value: /mnt/model-bundle
+          - name: CACHE_PATH
+            value: /tmp/model-cache
+          - name: LOG_LEVEL
+            value: INFO
+        resources:
+          cpu: 2.0
+          memory: 4Gi
+        volumeMounts:
+          - volumeName: model-bundle
+            mountPath: /mnt/model-bundle
+    volumes:
+      - name: model-bundle
+        storageType: AzureFile
+        storageName: $STORAGE_MOUNT_NAME
+    scale:
+      minReplicas: 1
+      maxReplicas: 2
+EOF
+```
+
+Replace `<SUBSCRIPTION_ID>` with your actual subscription ID.
+
+---
+
+### 13. Create the Container App from YAML
+
+This creates the app and applies the image, env vars, ingress, secrets, and volume mount in one go. ACA supports creating apps from YAML definitions. ([Microsoft Learn][2])
+
+```bash
+az containerapp create \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --environment "$ACA_ENV" \
+  --yaml app.yaml
+```
+
+If the app already exists and you want to apply YAML changes later:
+
+```bash
+az containerapp update \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --yaml app.yaml
+```
+
+---
+
+### 14. Check revisions
+
+ACA uses revisions for each deployment/config update. This is the main way to see whether the latest deployment is healthy or failing. ([Microsoft Learn][2])
+
+```bash
+az containerapp revision list \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  -o table
+```
+
+---
+
+### 15. Stream logs
+
+This is the main deployment troubleshooting mechanism. During this deployment, the logs were what allowed us to distinguish:
+
+* missing provider registration
+* image architecture mismatch
+* missing mount
+* wrong bundle path
+* runtime initialisation stage
+
+```bash
+az containerapp logs show \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --follow
+```
+
+---
+
+### 16. Get the public FQDN
+
+This fetches the app’s public hostname assigned by ACA. ([Microsoft Learn][2])
+
+```bash
+APP_FQDN=$(az containerapp show \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query properties.configuration.ingress.fqdn \
+  -o tsv)
+```
+
+---
+
+### 17. Test health and readiness
+
+These verify that the app is alive and that the GraphSAGE runtime finished initialising.
+
+```bash
+curl --max-time 15 "https://$APP_FQDN/healthz"
+curl --max-time 30 "https://$APP_FQDN/readyz"
+```
+
+A successful working deployment should return:
+
+* health OK
+* ready OK, with GraphSAGE runtime initialised
+
+---
+
+### 18. Make a prediction request
+
+This confirms the public API is actually serving inference.
+
+```bash
+curl --max-time 60 -X POST "https://$APP_FQDN/v1/predict-link" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "entity_a_name": "TP53",
+    "entity_b_name": "EGFR",
+    "attachment_strategy": "cosine"
+  }'
+```
+
+---
+
+### 19. Update the image later
+
+When the service code changes, build a new image tag and update the app to point at it. ACA will create a new revision for that update. ([Microsoft Learn][2])
+
+```bash
+NEW_TAG="v2"
+
+docker buildx build \
+  --platform linux/amd64 \
+  -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$NEW_TAG" \
+  --push .
+
+az containerapp update \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --image "$ACR_LOGIN_SERVER/$IMAGE_NAME:$NEW_TAG"
+```
+
+Then re-check revisions and logs:
+
+```bash
+az containerapp revision list \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  -o table
+
+az containerapp logs show \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --follow
+```
+
+---
+
+## Final lessons
+
+The deployment only became straightforward once we separated the problems into the right categories:
+
+* **Azure subscription setup**
+
+  * provider registration
+
+* **container image compatibility**
+
+  * `linux/amd64` image for ACA
+
+* **storage integration**
+
+  * environment storage attachment plus app-level volume mount
+
+* **application config**
+
+  * env var name/path used by the app
+
+* **runtime startup tracing**
+
+  * logs around bundle validation and runtime initialisation
+
+The biggest practical lesson is that for this kind of model-serving deployment, logs need to report:
+
+* resolved bundle path
+* discovered bundle files
+* runtime stage boundaries
+
+Without that, ACA startup failures are much harder to interpret.
