@@ -71,3 +71,6 @@ dmypy.json
 
 # macOS
 *.DS_Store
+
+# Serving bundle
+serving_bundle/
