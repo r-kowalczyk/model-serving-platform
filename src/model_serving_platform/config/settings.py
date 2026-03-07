@@ -28,6 +28,7 @@ class ServiceSettings(BaseSettings):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8000)
     reload: bool = Field(default=False)
+    log_level: str = Field(default="INFO")
     bundle_path: str = Field(default="./bundles/graphsage")
     max_top_k: int = Field(default=25, gt=0)
     default_attachment_strategy: Literal["interaction", "cosine"] = Field(

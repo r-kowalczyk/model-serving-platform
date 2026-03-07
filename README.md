@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 4 status
+## Stage 5 status
 
-Stage 4 adds the first versioned prediction endpoints with typed contracts.
+Stage 5 adds structured JSON logging and request correlation middleware.
 
 Included in this stage now:
 
@@ -24,6 +24,9 @@ Included in this stage now:
 - `GET /v1/metadata` endpoint exposing loaded bundle metadata and model backend details.
 - `POST /v1/predict-link` endpoint for one pair score response.
 - `POST /v1/predict-links` endpoint for ranked candidate score responses.
+- structured JSON logging with request correlation context.
+- `X-Request-ID` propagation for all HTTP responses.
+- request lifecycle logs for receive, complete, and failure paths.
 - runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
 - startup precompute of base node embeddings and runtime summary metadata.
 - fake runtime fixtures used by service-layer tests for deterministic behaviour.
@@ -74,6 +77,7 @@ Important startup rule:
 - The service fails fast on startup if `MODEL_SERVING_BUNDLE_PATH` does not point to a valid GraphSAGE bundle directory.
 - Readiness depends on both successful bundle validation and runtime initialisation.
 - Pair predictions reject requests where both endpoints are unseen in v1.
+- Prediction responses include request identifiers that align with request correlation headers.
 
 ## Quality checks
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from time import perf_counter
 from typing import cast
 from uuid import uuid4
@@ -14,6 +15,10 @@ from model_serving_platform.domain.prediction import (
     PredictLinksRequest,
     PredictLinksResponse,
     PredictionItem,
+)
+
+prediction_service_logger = logging.getLogger(
+    "model_serving_platform.prediction_service"
 )
 
 
@@ -98,6 +103,18 @@ class PredictionService:
         )
         request_latency_milliseconds = (perf_counter() - request_start_time) * 1000
         resolved_request_id = predict_link_request.request_id or str(uuid4())
+        prediction_service_logger.info(
+            "inference_complete",
+            extra={
+                "endpoint": "/v1/predict-link",
+                "latency_ms": request_latency_milliseconds,
+                "attachment_strategy_used": runtime_prediction_result.attachment_strategy_used,
+                "enrichment_status": runtime_prediction_result.enrichment_status,
+                "bundle_version": self._bundle_version,
+                "service_version": self._service_version,
+                "request_id": resolved_request_id,
+            },
+        )
 
         return PredictLinkResponse(
             score=runtime_prediction_result.score,
@@ -159,6 +176,20 @@ class PredictionService:
         else:
             response_enrichment_status = "not_required"
             attachment_strategy_used = resolved_attachment_strategy
+
+        prediction_service_logger.info(
+            "inference_complete",
+            extra={
+                "endpoint": "/v1/predict-links",
+                "latency_ms": request_latency_milliseconds,
+                "prediction_count": len(ranked_prediction_results),
+                "attachment_strategy_used": attachment_strategy_used,
+                "enrichment_status": response_enrichment_status,
+                "bundle_version": self._bundle_version,
+                "service_version": self._service_version,
+                "request_id": resolved_request_id,
+            },
+        )
 
         return PredictLinksResponse(
             predictions=[
