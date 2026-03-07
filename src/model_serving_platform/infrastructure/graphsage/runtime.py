@@ -71,6 +71,26 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             readiness_reason="graphsage runtime initialised",
         )
 
+    def has_entity_name(self, entity_name: str) -> bool:
+        """Return whether this entity name exists in bundle node mappings.
+
+        Service-level request rules use this check to decide whether requests
+        are existing-existing, one-unseen, or two-unseen endpoint scenarios.
+        Parameters: entity_name is matched against bundle display name mapping.
+        """
+
+        return entity_name in self._node_name_to_node_id
+
+    def get_known_entity_names(self) -> list[str]:
+        """Return deterministic sorted known entity names from the bundle.
+
+        Candidate ranking endpoints use this list as the known target pool and
+        sorting keeps deterministic behaviour for stable API-level tests.
+        Parameters: none.
+        """
+
+        return sorted(self._node_name_to_node_id.keys())
+
     @classmethod
     def from_loaded_bundle_metadata(
         cls, loaded_bundle_metadata: LoadedGraphSageBundleMetadata
@@ -109,6 +129,8 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         source_entity_name: str,
         target_entity_name: str,
         attachment_strategy: str,
+        source_entity_description: str | None = None,
+        target_entity_description: str | None = None,
     ) -> RuntimePredictionResult:
         """Score one existing entity pair using precomputed node embeddings.
 
@@ -117,21 +139,32 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         Parameters: source and target names identify one prediction request.
         """
 
-        source_vector = self._resolve_existing_entity_embedding(
-            entity_name=source_entity_name
+        source_entity_is_known = self.has_entity_name(entity_name=source_entity_name)
+        target_entity_is_known = self.has_entity_name(entity_name=target_entity_name)
+        if not source_entity_is_known and not target_entity_is_known:
+            raise ValueError("Two unseen endpoints are not supported.")
+
+        source_vector = self._resolve_entity_embedding(
+            entity_name=source_entity_name,
+            entity_description=source_entity_description,
         )
-        target_vector = self._resolve_existing_entity_embedding(
-            entity_name=target_entity_name
+        target_vector = self._resolve_entity_embedding(
+            entity_name=target_entity_name,
+            entity_description=target_entity_description,
         )
         score_value = _cosine_similarity(
             source_vector=source_vector, target_vector=target_vector
         )
+        if source_entity_is_known and target_entity_is_known:
+            enrichment_status = "not_required"
+        else:
+            enrichment_status = "degraded_local_text"
         return RuntimePredictionResult(
             source_entity_name=source_entity_name,
             target_entity_name=target_entity_name,
             score=score_value,
             attachment_strategy_used=attachment_strategy,
-            enrichment_status="not_required",
+            enrichment_status=enrichment_status,
         )
 
     def score_entity_against_candidates(
@@ -140,6 +173,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         candidate_entity_names: list[str],
         top_k: int,
         attachment_strategy: str,
+        source_entity_description: str | None = None,
     ) -> list[RuntimePredictionResult]:
         """Score one entity against candidate entities using preload vectors.
 
@@ -148,10 +182,12 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         Parameters: entity names and top_k control ranked output entries.
         """
 
-        source_vector = self._resolve_existing_entity_embedding(
-            entity_name=source_entity_name
+        source_vector = self._resolve_entity_embedding(
+            entity_name=source_entity_name,
+            entity_description=source_entity_description,
         )
         scored_candidate_predictions: list[RuntimePredictionResult] = []
+        source_entity_is_known = self.has_entity_name(entity_name=source_entity_name)
         for candidate_entity_name in candidate_entity_names:
             candidate_vector = self._resolve_existing_entity_embedding(
                 entity_name=candidate_entity_name
@@ -166,7 +202,11 @@ class GraphSageInferenceRuntime(InferenceRuntime):
                     target_entity_name=candidate_entity_name,
                     score=score_value,
                     attachment_strategy_used=attachment_strategy,
-                    enrichment_status="not_required",
+                    enrichment_status=(
+                        "not_required"
+                        if source_entity_is_known
+                        else "degraded_local_text"
+                    ),
                 )
             )
         scored_candidate_predictions.sort(
@@ -190,6 +230,24 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             resolved_node_index
         ]
         return np.asarray(resolved_embedding_vector, dtype=np.float64)
+
+    def _resolve_entity_embedding(
+        self, entity_name: str, entity_description: str | None
+    ) -> NDArray[np.float64]:
+        """Resolve an embedding for known and unseen entity request paths.
+
+        This function uses precomputed vectors for known nodes and a local
+        deterministic text projection for one unseen endpoint in Stage 4.
+        Parameters: entity_name and description define unseen text embedding.
+        """
+
+        if self.has_entity_name(entity_name=entity_name):
+            return self._resolve_existing_entity_embedding(entity_name=entity_name)
+        return _build_unseen_entity_embedding(
+            entity_text=entity_description or entity_name,
+            output_dimension=self._model_reconstruction_spec.output_dimension,
+            attachment_seed=self._model_reconstruction_spec.num_layers,
+        )
 
 
 def _build_model_reconstruction_spec(
@@ -248,3 +306,25 @@ def _cosine_similarity(
     numerator = float(np.dot(source_vector, target_vector))
     denominator = float(np.linalg.norm(source_vector) * np.linalg.norm(target_vector))
     return numerator / denominator
+
+
+def _build_unseen_entity_embedding(
+    entity_text: str, output_dimension: int, attachment_seed: int
+) -> NDArray[np.float64]:
+    """Build a deterministic embedding vector for one unseen entity text.
+
+    Stage 4 uses this local deterministic vector because external enrichment
+    clients are introduced later while API and runtime boundaries stabilise.
+    Parameters: text content and dimensions define the embedding output.
+    """
+
+    deterministic_seed = attachment_seed + sum(
+        ord(character) for character in entity_text
+    )
+    random_number_generator = np.random.default_rng(seed=deterministic_seed)
+    unseen_entity_embedding = random_number_generator.normal(
+        loc=0.0,
+        scale=0.1,
+        size=(output_dimension,),
+    )
+    return np.asarray(unseen_entity_embedding, dtype=np.float64)

@@ -7,7 +7,9 @@ from fastapi import FastAPI
 
 from model_serving_platform.api.routes.health import health_router
 from model_serving_platform.api.routes.metadata import metadata_router
+from model_serving_platform.api.routes.predictions import prediction_router
 from model_serving_platform.application.inference_runtime import InferenceRuntime
+from model_serving_platform.application.prediction_service import PredictionService
 from model_serving_platform.application.service_state import ServiceRuntimeState
 from model_serving_platform.config.settings import ServiceSettings
 from model_serving_platform.infrastructure.bundles.loader import GraphSageBundleLoader
@@ -54,6 +56,13 @@ def create_app(
     application.state.service_settings = resolved_service_settings
     application.state.loaded_bundle_metadata = loaded_bundle_metadata
     application.state.inference_runtime = resolved_inference_runtime
+    application.state.prediction_service = PredictionService(
+        inference_runtime=resolved_inference_runtime,
+        service_version=resolved_service_settings.service_version,
+        bundle_version=loaded_bundle_metadata.bundle_version,
+        max_top_k=resolved_service_settings.max_top_k,
+        default_attachment_strategy=resolved_service_settings.default_attachment_strategy,
+    )
     application.state.runtime_initialisation_summary = (
         resolved_inference_runtime.initialisation_summary
     )
@@ -61,4 +70,5 @@ def create_app(
 
     application.include_router(health_router)
     application.include_router(metadata_router)
+    application.include_router(prediction_router)
     return application

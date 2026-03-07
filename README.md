@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 3 status
+## Stage 4 status
 
-Stage 3 adds a GraphSAGE runtime boundary and runtime-aware readiness wiring.
+Stage 4 adds the first versioned prediction endpoints with typed contracts.
 
 Included in this stage now:
 
@@ -22,6 +22,8 @@ Included in this stage now:
 - `GET /healthz` liveness endpoint.
 - `GET /readyz` readiness endpoint that is true only after bundle validation succeeds.
 - `GET /v1/metadata` endpoint exposing loaded bundle metadata and model backend details.
+- `POST /v1/predict-link` endpoint for one pair score response.
+- `POST /v1/predict-links` endpoint for ranked candidate score responses.
 - runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
 - startup precompute of base node embeddings and runtime summary metadata.
 - fake runtime fixtures used by service-layer tests for deterministic behaviour.
@@ -64,11 +66,14 @@ Then check:
 - `GET http://localhost:8000/healthz`
 - `GET http://localhost:8000/readyz`
 - `GET http://localhost:8000/v1/metadata`
+- `POST http://localhost:8000/v1/predict-link`
+- `POST http://localhost:8000/v1/predict-links`
 
 Important startup rule:
 
 - The service fails fast on startup if `MODEL_SERVING_BUNDLE_PATH` does not point to a valid GraphSAGE bundle directory.
 - Readiness depends on both successful bundle validation and runtime initialisation.
+- Pair predictions reject requests where both endpoints are unseen in v1.
 
 ## Quality checks
 

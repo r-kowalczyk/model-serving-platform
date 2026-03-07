@@ -1,5 +1,7 @@
 """Environment based settings for the service."""
 
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,3 +29,7 @@ class ServiceSettings(BaseSettings):
     port: int = Field(default=8000)
     reload: bool = Field(default=False)
     bundle_path: str = Field(default="./bundles/graphsage")
+    max_top_k: int = Field(default=25, gt=0)
+    default_attachment_strategy: Literal["interaction", "cosine"] = Field(
+        default="interaction"
+    )

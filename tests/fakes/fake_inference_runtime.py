@@ -32,12 +32,35 @@ class FakeInferenceRuntime(InferenceRuntime):
             is_ready=is_ready,
             readiness_reason=readiness_reason,
         )
+        self._known_entity_names = ["Node One", "Node Two", "Node Three"]
+
+    def has_entity_name(self, entity_name: str) -> bool:
+        """Return whether entity exists in fake known entity list.
+
+        Service-layer tests use this to verify one-unseen and two-unseen
+        request constraints independently from concrete runtime internals.
+        Parameters: entity_name is compared against fake known entities.
+        """
+
+        return entity_name in self._known_entity_names
+
+    def get_known_entity_names(self) -> list[str]:
+        """Return deterministic known entity names for fake runtime tests.
+
+        API tests rely on this list when building candidate pools for ranked
+        predictions, which keeps responses deterministic and straightforward.
+        Parameters: none.
+        """
+
+        return list(self._known_entity_names)
 
     def score_entity_pair(
         self,
         source_entity_name: str,
         target_entity_name: str,
         attachment_strategy: str,
+        source_entity_description: str | None = None,
+        target_entity_description: str | None = None,
     ) -> RuntimePredictionResult:
         """Return one deterministic score result for a pair request.
 
@@ -46,12 +69,21 @@ class FakeInferenceRuntime(InferenceRuntime):
         Parameters: names are mirrored into the returned prediction result.
         """
 
+        source_entity_is_known = self.has_entity_name(entity_name=source_entity_name)
+        target_entity_is_known = self.has_entity_name(entity_name=target_entity_name)
+        if not source_entity_is_known and not target_entity_is_known:
+            raise ValueError("Two unseen endpoints are not supported.")
+
         return RuntimePredictionResult(
             source_entity_name=source_entity_name,
             target_entity_name=target_entity_name,
             score=0.75,
             attachment_strategy_used=attachment_strategy,
-            enrichment_status="not_required",
+            enrichment_status=(
+                "not_required"
+                if source_entity_is_known and target_entity_is_known
+                else "degraded_local_text"
+            ),
         )
 
     def score_entity_against_candidates(
@@ -60,6 +92,7 @@ class FakeInferenceRuntime(InferenceRuntime):
         candidate_entity_names: list[str],
         top_k: int,
         attachment_strategy: str,
+        source_entity_description: str | None = None,
     ) -> list[RuntimePredictionResult]:
         """Return deterministic top-k candidate scores for ranking tests.
 
@@ -69,6 +102,7 @@ class FakeInferenceRuntime(InferenceRuntime):
         """
 
         ranked_prediction_results: list[RuntimePredictionResult] = []
+        source_entity_is_known = self.has_entity_name(entity_name=source_entity_name)
         for candidate_index, candidate_entity_name in enumerate(candidate_entity_names):
             ranked_prediction_results.append(
                 RuntimePredictionResult(
@@ -76,7 +110,11 @@ class FakeInferenceRuntime(InferenceRuntime):
                     target_entity_name=candidate_entity_name,
                     score=1.0 - (candidate_index * 0.1),
                     attachment_strategy_used=attachment_strategy,
-                    enrichment_status="not_required",
+                    enrichment_status=(
+                        "not_required"
+                        if source_entity_is_known
+                        else "degraded_local_text"
+                    ),
                 )
             )
         return ranked_prediction_results[:top_k]
