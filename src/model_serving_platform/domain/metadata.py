@@ -40,4 +40,7 @@ class ServiceMetadataResponse(BaseModel):
     model_backend: str
     startup_timestamp: str
     supported_attachment_strategies: list[str]
+    runtime_name: str
+    runtime_model_num_layers: int
+    runtime_base_embedding_count: int
     bundle_metadata: GraphSageBundleMetadataResponse

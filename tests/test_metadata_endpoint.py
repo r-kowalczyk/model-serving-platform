@@ -30,6 +30,9 @@ def test_metadata_endpoint_returns_loaded_bundle_details(
     assert response.status_code == 200
     assert response_payload["model_backend"] == "graphsage"
     assert response_payload["bundle_metadata"]["feature_dimension"] == 4
+    assert response_payload["runtime_name"] == "graphsage"
+    assert response_payload["runtime_model_num_layers"] == 2
+    assert response_payload["runtime_base_embedding_count"] == 3
 
 
 def test_create_app_fails_fast_when_bundle_path_is_invalid(

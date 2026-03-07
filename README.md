@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 2 status
+## Stage 3 status
 
-Stage 2 adds GraphSAGE bundle contract validation and fail-fast startup checks.
+Stage 3 adds a GraphSAGE runtime boundary and runtime-aware readiness wiring.
 
 Included in this stage now:
 
@@ -22,6 +22,9 @@ Included in this stage now:
 - `GET /healthz` liveness endpoint.
 - `GET /readyz` readiness endpoint that is true only after bundle validation succeeds.
 - `GET /v1/metadata` endpoint exposing loaded bundle metadata and model backend details.
+- runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
+- startup precompute of base node embeddings and runtime summary metadata.
+- fake runtime fixtures used by service-layer tests for deterministic behaviour.
 - Package structure for API, application, domain, infrastructure, and config layers.
 - GraphSAGE bundle loader that validates:
   - required files
@@ -65,6 +68,7 @@ Then check:
 Important startup rule:
 
 - The service fails fast on startup if `MODEL_SERVING_BUNDLE_PATH` does not point to a valid GraphSAGE bundle directory.
+- Readiness depends on both successful bundle validation and runtime initialisation.
 
 ## Quality checks
 

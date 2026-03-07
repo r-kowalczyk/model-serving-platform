@@ -2,6 +2,9 @@
 
 from fastapi import APIRouter, Request
 
+from model_serving_platform.application.inference_runtime import (
+    RuntimeInitialisationSummary,
+)
 from model_serving_platform.domain.metadata import (
     GraphSageBundleMetadataResponse,
     ServiceMetadataResponse,
@@ -25,11 +28,17 @@ def get_service_metadata(request: Request) -> ServiceMetadataResponse:
     loaded_bundle_metadata: LoadedGraphSageBundleMetadata = (
         request.app.state.loaded_bundle_metadata
     )
+    runtime_initialisation_summary: RuntimeInitialisationSummary = (
+        request.app.state.runtime_initialisation_summary
+    )
     return ServiceMetadataResponse(
         service_version=request.app.state.service_settings.service_version,
         model_backend="graphsage",
         startup_timestamp=request.app.state.startup_timestamp,
         supported_attachment_strategies=["interaction", "cosine"],
+        runtime_name=runtime_initialisation_summary.runtime_name,
+        runtime_model_num_layers=runtime_initialisation_summary.model_num_layers,
+        runtime_base_embedding_count=runtime_initialisation_summary.base_embedding_count,
         bundle_metadata=GraphSageBundleMetadataResponse(
             bundle_path=loaded_bundle_metadata.bundle_path,
             manifest_path=loaded_bundle_metadata.manifest_path,

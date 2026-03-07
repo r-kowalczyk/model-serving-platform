@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.bundle_test_data import write_valid_bundle
+from tests.fakes.fake_inference_runtime import FakeInferenceRuntime
 
 
 @pytest.fixture()
@@ -31,3 +32,15 @@ def configured_bundle_environment(
     """
 
     monkeypatch.setenv("MODEL_SERVING_BUNDLE_PATH", str(valid_bundle_directory_path))
+
+
+@pytest.fixture()
+def fake_inference_runtime() -> FakeInferenceRuntime:
+    """Provide a deterministic fake runtime for service-layer tests.
+
+    Service tests use this fixture to isolate API and app wiring from
+    GraphSAGE implementation details while keeping boundary behaviour explicit.
+    Parameters: none.
+    """
+
+    return FakeInferenceRuntime()
