@@ -16,6 +16,7 @@ FROM python:3.13-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/app/.venv/bin:${PATH}"
+ENV PYTHONPATH="/app/src"
 
 WORKDIR /app
 

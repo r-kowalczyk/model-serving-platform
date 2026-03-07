@@ -74,3 +74,4 @@ dmypy.json
 
 # Serving bundle
 serving_bundle/
+deployment_journey.md

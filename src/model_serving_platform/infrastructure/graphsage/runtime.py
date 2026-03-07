@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 from numpy.typing import NDArray
@@ -21,6 +23,10 @@ from model_serving_platform.infrastructure.clients.enrichment import (
     ExternalEnrichmentClient,
     InteractionPartnerLookupResult,
     NoopExternalEnrichmentClient,
+)
+
+graph_sage_runtime_logger = logging.getLogger(
+    "model_serving_platform.infrastructure.graphsage.runtime"
 )
 
 
@@ -114,19 +120,73 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         Parameters: loaded_bundle_metadata references validated bundle files.
         """
 
+        runtime_initialisation_start_timestamp = perf_counter()
+        graph_sage_runtime_logger.info(
+            "runtime_bundle_materialisation_started",
+            extra={
+                "manifest_path": loaded_bundle_metadata.manifest_path,
+                "node_features_path": loaded_bundle_metadata.node_features_path,
+                "bundle_path": loaded_bundle_metadata.bundle_path,
+            },
+        )
+        manifest_loading_start_timestamp = perf_counter()
         manifest_payload = json.loads(
             Path(loaded_bundle_metadata.manifest_path).read_text(encoding="utf-8")
         )
+        manifest_loading_elapsed_milliseconds = int(
+            (perf_counter() - manifest_loading_start_timestamp) * 1000
+        )
+        graph_sage_runtime_logger.info(
+            "runtime_manifest_loaded",
+            extra={
+                "manifest_path": loaded_bundle_metadata.manifest_path,
+                "manifest_loading_elapsed_milliseconds": manifest_loading_elapsed_milliseconds,
+            },
+        )
+        node_feature_loading_start_timestamp = perf_counter()
         node_features_array = np.load(loaded_bundle_metadata.node_features_path)
+        node_feature_loading_elapsed_milliseconds = int(
+            (perf_counter() - node_feature_loading_start_timestamp) * 1000
+        )
+        graph_sage_runtime_logger.info(
+            "runtime_node_features_loaded",
+            extra={
+                "node_features_path": loaded_bundle_metadata.node_features_path,
+                "node_feature_shape": list(node_features_array.shape),
+                "node_feature_loading_elapsed_milliseconds": node_feature_loading_elapsed_milliseconds,
+            },
+        )
         model_reconstruction_spec = _build_model_reconstruction_spec(
             model_architecture=loaded_bundle_metadata.model_architecture
         )
 
         # A deterministic projection is used here to keep Stage 3 runtime simple while proving preload wiring.
+        embedding_precomputation_start_timestamp = perf_counter()
         precomputed_node_embeddings = _precompute_base_node_embeddings(
             node_features_array=node_features_array,
             output_dimension=model_reconstruction_spec.output_dimension,
             attachment_seed=loaded_bundle_metadata.attachment_seed,
+        )
+        embedding_precomputation_elapsed_milliseconds = int(
+            (perf_counter() - embedding_precomputation_start_timestamp) * 1000
+        )
+        graph_sage_runtime_logger.info(
+            "runtime_base_embeddings_precomputed",
+            extra={
+                "base_embedding_shape": list(precomputed_node_embeddings.shape),
+                "embedding_precomputation_elapsed_milliseconds": embedding_precomputation_elapsed_milliseconds,
+            },
+        )
+        runtime_initialisation_elapsed_milliseconds = int(
+            (perf_counter() - runtime_initialisation_start_timestamp) * 1000
+        )
+        graph_sage_runtime_logger.info(
+            "runtime_bundle_materialisation_finished",
+            extra={
+                "runtime_initialisation_elapsed_milliseconds": runtime_initialisation_elapsed_milliseconds,
+                "manifest_path": loaded_bundle_metadata.manifest_path,
+                "node_features_path": loaded_bundle_metadata.node_features_path,
+            },
         )
 
         return cls(

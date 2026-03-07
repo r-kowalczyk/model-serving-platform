@@ -49,7 +49,8 @@ def mypy(session: nox.Session) -> None:
     command_line_arguments = session.posargs or ("src", "tests")
     # Install the project and typing tools inside the session so that type information is available to mypy.
     session.install(".")
-    session.install("mypy", "typing-extensions")
+    # Install pytest because tests and fixtures are type-checked and rely on pytest symbols and decorators.
+    session.install("mypy", "typing-extensions", "pytest")
     # Invoke mypy with the computed arguments so that static issues are reported consistently.
     _run(session, "mypy", *command_line_arguments)
 

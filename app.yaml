@@ -1,0 +1,39 @@
+location: uksouth
+properties:
+  managedEnvironmentId: /subscriptions/d2d3a181-bea8-425b-bacd-cbfb7fb5dfef/resourceGroups/rg-model-serving-platform/providers/Microsoft.App/managedEnvironments/aca-env-model-serving
+  configuration:
+    ingress:
+      external: true
+      targetPort: 8000
+      transport: auto
+    registries:
+      - server: acrmodelservingplatform.azurecr.io
+        username: acrmodelservingplatform
+        passwordSecretRef: acr-password
+    secrets:
+      - name: acr-password
+        value: 1VyQIgbmB777Hln601QzwYWm4yEIXXUGgnwUE8V7fpI3EiZ7PR8AJQQJ99CCACmepeSEqg7NAAACAZCRaEui
+  template:
+    containers:
+      - name: graphsage-serving-api
+        image: acrmodelservingplatform.azurecr.io/model-serving-platform:v1
+        env:
+          - name: MODEL_SERVING_BUNDLE_PATH
+            value: /mnt/model-bundle
+          - name: MODEL_SERVING_CACHE_PATH
+            value: /tmp/model-cache
+          - name: MODEL_SERVING_LOG_LEVEL
+            value: INFO
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+        volumeMounts:
+          - volumeName: model-bundle
+            mountPath: /mnt/model-bundle
+    volumes:
+      - name: model-bundle
+        storageType: AzureFile
+        storageName: graphsagebundlemount
+    scale:
+      minReplicas: 1
+      maxReplicas: 2

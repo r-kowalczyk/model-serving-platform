@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -20,6 +23,11 @@ REQUIRED_BUNDLE_FILE_NAMES = (
     "manifest.json",
     "node_features.npy",
     "edge_index.npy",
+)
+OPTIONAL_CACHE_FILE_NAMES = ("resolver_cache.json", "interaction_cache.json")
+
+bundle_loader_logger = logging.getLogger(
+    "model_serving_platform.infrastructure.bundles.loader"
 )
 
 
@@ -69,7 +77,42 @@ class GraphSageBundleLoader:
         Parameters: bundle_directory_path points to an extracted bundle.
         """
 
-        self._validate_required_files(bundle_directory_path=bundle_directory_path)
+        resolved_bundle_directory_path = bundle_directory_path.resolve()
+        bundle_directory_diagnostics = self._collect_bundle_directory_diagnostics(
+            bundle_directory_path=resolved_bundle_directory_path
+        )
+        bundle_loader_logger.info(
+            "bundle_validation_started",
+            extra={
+                "bundle_directory_path": str(resolved_bundle_directory_path),
+                "bundle_directory_exists": bundle_directory_diagnostics[
+                    "bundle_directory_exists"
+                ],
+                "bundle_directory_is_dir": bundle_directory_diagnostics[
+                    "bundle_directory_is_dir"
+                ],
+                "bundle_directory_is_readable": bundle_directory_diagnostics[
+                    "bundle_directory_is_readable"
+                ],
+                "discovered_bundle_file_names": bundle_directory_diagnostics[
+                    "discovered_bundle_file_names"
+                ],
+                "list_directory_error": bundle_directory_diagnostics[
+                    "list_directory_error"
+                ],
+            },
+        )
+        self._validate_bundle_directory_access(
+            bundle_directory_path=resolved_bundle_directory_path,
+            bundle_directory_diagnostics=bundle_directory_diagnostics,
+        )
+        self._validate_required_files(
+            bundle_directory_path=bundle_directory_path,
+            bundle_directory_diagnostics=bundle_directory_diagnostics,
+        )
+        self._initialise_optional_cache_files(
+            bundle_directory_path=resolved_bundle_directory_path
+        )
         parsed_manifest = self._load_manifest(
             bundle_directory_path=bundle_directory_path
         )
@@ -101,7 +144,11 @@ class GraphSageBundleLoader:
             bundle_version=parsed_manifest.bundle_version,
         )
 
-    def _validate_required_files(self, bundle_directory_path: Path) -> None:
+    def _validate_required_files(
+        self,
+        bundle_directory_path: Path,
+        bundle_directory_diagnostics: dict[str, object],
+    ) -> None:
         """Ensure required bundle artefacts are present before loading data.
 
         This check exists to avoid partial startup where core model files are
@@ -115,12 +162,170 @@ class GraphSageBundleLoader:
             if not (bundle_directory_path / file_name).exists()
         ]
         if missing_file_names:
+            discovered_bundle_file_names = cast(
+                list[str], bundle_directory_diagnostics["discovered_bundle_file_names"]
+            )
+            discovered_file_names_display = (
+                ", ".join(discovered_bundle_file_names)
+                if discovered_bundle_file_names
+                else "<none>"
+            )
+            bundle_loader_logger.error(
+                "bundle_required_files_missing",
+                extra={
+                    "bundle_directory_path": str(bundle_directory_path),
+                    "missing_file_names": missing_file_names,
+                    "discovered_bundle_file_names": discovered_bundle_file_names,
+                },
+            )
             raise GraphSageBundleValidationError(
                 error_code="missing_required_files",
-                message="Bundle is missing one or more required files.",
+                message="Bundle is missing required files: "
+                + ", ".join(missing_file_names)
+                + ". Discovered files: "
+                + discovered_file_names_display,
                 details={
                     "bundle_directory_path": str(bundle_directory_path),
                     "missing_file_names": missing_file_names,
+                    "bundle_directory_exists": bundle_directory_diagnostics[
+                        "bundle_directory_exists"
+                    ],
+                    "bundle_directory_is_dir": bundle_directory_diagnostics[
+                        "bundle_directory_is_dir"
+                    ],
+                    "bundle_directory_is_readable": bundle_directory_diagnostics[
+                        "bundle_directory_is_readable"
+                    ],
+                    "discovered_bundle_file_names": discovered_bundle_file_names,
+                    "list_directory_error": bundle_directory_diagnostics[
+                        "list_directory_error"
+                    ],
+                },
+            )
+
+    def _validate_bundle_directory_access(
+        self,
+        bundle_directory_path: Path,
+        bundle_directory_diagnostics: dict[str, object],
+    ) -> None:
+        """Ensure bundle directory exists, is a directory, and is readable.
+
+        Deployment mount issues can present as missing required files even when
+        artefacts exist in storage, so this preflight check fails with explicit
+        diagnostics before required file validation is attempted.
+        Parameters: bundle_directory_path points to the expected bundle root.
+        """
+
+        bundle_directory_exists = bool(
+            bundle_directory_diagnostics["bundle_directory_exists"]
+        )
+        bundle_directory_is_dir = bool(
+            bundle_directory_diagnostics["bundle_directory_is_dir"]
+        )
+        bundle_directory_is_readable = bool(
+            bundle_directory_diagnostics["bundle_directory_is_readable"]
+        )
+        if (
+            bundle_directory_exists
+            and bundle_directory_is_dir
+            and bundle_directory_is_readable
+        ):
+            return
+        raise GraphSageBundleValidationError(
+            error_code="invalid_bundle_directory",
+            message=(
+                "Bundle directory is not accessible. "
+                f"path={bundle_directory_path}; "
+                f"exists={bundle_directory_exists}; "
+                f"is_dir={bundle_directory_is_dir}; "
+                f"is_readable={bundle_directory_is_readable}; "
+                "list_directory_error="
+                f"{bundle_directory_diagnostics['list_directory_error']}"
+            ),
+            details={
+                "bundle_directory_path": str(bundle_directory_path),
+                "bundle_directory_exists": bundle_directory_exists,
+                "bundle_directory_is_dir": bundle_directory_is_dir,
+                "bundle_directory_is_readable": bundle_directory_is_readable,
+                "list_directory_error": bundle_directory_diagnostics[
+                    "list_directory_error"
+                ],
+                "discovered_bundle_file_names": bundle_directory_diagnostics[
+                    "discovered_bundle_file_names"
+                ],
+            },
+        )
+
+    def _collect_bundle_directory_diagnostics(
+        self, bundle_directory_path: Path
+    ) -> dict[str, object]:
+        """Collect visibility and listing diagnostics for bundle directory.
+
+        Startup diagnostics should include concrete path state because mount
+        and permission issues can hide files without changing configuration.
+        Parameters: bundle_directory_path points to the expected bundle root.
+        """
+
+        bundle_directory_exists = bundle_directory_path.exists()
+        bundle_directory_is_dir = (
+            bundle_directory_path.is_dir() if bundle_directory_exists else False
+        )
+        bundle_directory_is_readable = (
+            os.access(bundle_directory_path, os.R_OK | os.X_OK)
+            if bundle_directory_exists and bundle_directory_is_dir
+            else False
+        )
+        discovered_bundle_file_names: list[str] = []
+        list_directory_error: str | None = None
+        if bundle_directory_exists and bundle_directory_is_dir:
+            try:
+                discovered_bundle_file_names = sorted(
+                    file_path.name
+                    for file_path in bundle_directory_path.iterdir()
+                    if file_path.is_file()
+                )
+            except Exception as directory_listing_error:
+                list_directory_error = str(directory_listing_error)
+        return {
+            "bundle_directory_exists": bundle_directory_exists,
+            "bundle_directory_is_dir": bundle_directory_is_dir,
+            "bundle_directory_is_readable": bundle_directory_is_readable,
+            "discovered_bundle_file_names": discovered_bundle_file_names,
+            "list_directory_error": list_directory_error,
+        }
+
+    def _initialise_optional_cache_files(self, bundle_directory_path: Path) -> None:
+        """Create optional cache files when they are absent at startup.
+
+        Cache files are treated as optional contract artefacts because serving
+        can create an empty cache and continue with deterministic behaviour.
+        Parameters: bundle_directory_path points to the expected bundle root.
+        """
+
+        for optional_cache_file_name in OPTIONAL_CACHE_FILE_NAMES:
+            optional_cache_file_path = bundle_directory_path / optional_cache_file_name
+            if optional_cache_file_path.exists():
+                continue
+            # Writing empty JSON objects here keeps startup deterministic when
+            # bundles are uploaded without optional cache artefacts.
+            try:
+                optional_cache_file_path.write_text("{}", encoding="utf-8")
+            except Exception as cache_initialisation_error:
+                raise GraphSageBundleValidationError(
+                    error_code="optional_cache_initialisation_failed",
+                    message="Unable to initialise optional cache file: "
+                    + optional_cache_file_name,
+                    details={
+                        "bundle_directory_path": str(bundle_directory_path),
+                        "optional_cache_file_name": optional_cache_file_name,
+                        "cache_initialisation_error": str(cache_initialisation_error),
+                    },
+                ) from cache_initialisation_error
+            bundle_loader_logger.info(
+                "bundle_optional_cache_file_created",
+                extra={
+                    "bundle_directory_path": str(bundle_directory_path),
+                    "optional_cache_file_name": optional_cache_file_name,
                 },
             )
 

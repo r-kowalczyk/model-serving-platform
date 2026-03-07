@@ -3,6 +3,7 @@
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 
 from fastapi import FastAPI
 
@@ -46,6 +47,8 @@ def create_app(
     """
 
     resolved_service_settings = service_settings or ServiceSettings()
+    resolved_bundle_path = str(Path(resolved_service_settings.bundle_path).resolve())
+    resolved_cache_path = str(Path(resolved_service_settings.cache_path).resolve())
     configure_structured_logging(
         log_level=resolved_service_settings.log_level,
         service_name=resolved_service_settings.service_name,
@@ -58,6 +61,19 @@ def create_app(
         title=resolved_service_settings.service_name,
         version=resolved_service_settings.service_version,
         description="Production-style GraphSAGE serving service",
+    )
+    # This startup log is emitted before any bundle IO so deployment issues can
+    # be traced from resolved paths and lifecycle stage markers.
+    app_logger.info(
+        "startup_bundle_validation_started",
+        extra={
+            "resolved_bundle_path": resolved_bundle_path,
+            "resolved_cache_path": resolved_cache_path,
+            "bundle_validation_starting": True,
+            "runtime_initialisation_starting": False,
+            "runtime_initialisation_finished": False,
+            "service_version": resolved_service_settings.service_version,
+        },
     )
     loaded_bundle_metadata = resolved_bundle_loader.load_and_validate_bundle(
         bundle_directory_path=Path(resolved_service_settings.bundle_path)
@@ -73,6 +89,20 @@ def create_app(
             "service_version": resolved_service_settings.service_version,
         },
     )
+    # This log marks the handover point from bundle checks to runtime wiring so
+    # operators can separate bundle faults from runtime initialisation faults.
+    app_logger.info(
+        "startup_runtime_initialisation_started",
+        extra={
+            "resolved_bundle_path": resolved_bundle_path,
+            "resolved_cache_path": resolved_cache_path,
+            "bundle_validation_starting": False,
+            "runtime_initialisation_starting": True,
+            "runtime_initialisation_finished": False,
+            "service_version": resolved_service_settings.service_version,
+        },
+    )
+    runtime_initialisation_start_timestamp = perf_counter()
     local_file_cache_store = LocalFileCacheStore(
         cache_directory_path=Path(resolved_service_settings.cache_path),
         ttl_seconds=resolved_service_settings.cache_ttl_seconds,
@@ -90,20 +120,46 @@ def create_app(
         cache_store=local_file_cache_store,
         service_metrics=service_metrics,
     )
-    resolved_inference_runtime = (
-        inference_runtime
-        or GraphSageInferenceRuntime.from_loaded_bundle_metadata(
-            loaded_bundle_metadata=loaded_bundle_metadata,
-            external_enrichment_client=external_enrichment_client,
-            restricted_network_mode=resolved_service_settings.restricted_network_mode,
+    try:
+        resolved_inference_runtime = (
+            inference_runtime
+            or GraphSageInferenceRuntime.from_loaded_bundle_metadata(
+                loaded_bundle_metadata=loaded_bundle_metadata,
+                external_enrichment_client=external_enrichment_client,
+                restricted_network_mode=resolved_service_settings.restricted_network_mode,
+            )
         )
+    except Exception:
+        runtime_initialisation_elapsed_milliseconds = int(
+            (perf_counter() - runtime_initialisation_start_timestamp) * 1000
+        )
+        app_logger.exception(
+            "startup_runtime_initialisation_failed",
+            extra={
+                "resolved_bundle_path": resolved_bundle_path,
+                "resolved_cache_path": resolved_cache_path,
+                "runtime_initialisation_elapsed_milliseconds": runtime_initialisation_elapsed_milliseconds,
+                "runtime_initialisation_starting": True,
+                "runtime_initialisation_finished": False,
+                "service_version": resolved_service_settings.service_version,
+            },
+        )
+        raise
+    runtime_initialisation_elapsed_milliseconds = int(
+        (perf_counter() - runtime_initialisation_start_timestamp) * 1000
     )
     app_logger.info(
-        "runtime_initialised",
+        "startup_runtime_initialisation_finished",
         extra={
             "runtime_name": resolved_inference_runtime.initialisation_summary.runtime_name,
             "runtime_model_num_layers": resolved_inference_runtime.initialisation_summary.model_num_layers,
             "runtime_base_embedding_count": resolved_inference_runtime.initialisation_summary.base_embedding_count,
+            "resolved_bundle_path": resolved_bundle_path,
+            "resolved_cache_path": resolved_cache_path,
+            "bundle_validation_starting": False,
+            "runtime_initialisation_starting": False,
+            "runtime_initialisation_finished": True,
+            "runtime_initialisation_elapsed_milliseconds": runtime_initialisation_elapsed_milliseconds,
             "bundle_version": loaded_bundle_metadata.bundle_version,
             "service_version": resolved_service_settings.service_version,
         },

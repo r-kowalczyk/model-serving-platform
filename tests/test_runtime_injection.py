@@ -1,5 +1,6 @@
 """Tests for app wiring with injected inference runtimes."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from model_serving_platform.api.app import create_app
@@ -45,3 +46,27 @@ def test_metadata_uses_injected_fake_runtime_summary(
 
     assert response.status_code == 200
     assert response.json()["runtime_name"] == "fake-graphsage-runtime"
+
+
+def test_create_app_raises_when_runtime_initialisation_fails(
+    configured_bundle_environment: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify app factory re-raises runtime initialisation failures.
+
+    Startup must fail fast when runtime wiring cannot complete, so this test
+    forces a runtime construction error and confirms exception propagation.
+    Parameters: configured_bundle_environment and monkeypatch are fixtures.
+    """
+
+    # This monkeypatch forces the runtime creation branch to fail so the test
+    # covers startup exception logging and error propagation behaviour.
+    def _raise_runtime_initialisation_failure(**_: object) -> object:
+        raise RuntimeError("forced runtime initialisation failure")
+
+    monkeypatch.setattr(
+        "model_serving_platform.api.app.GraphSageInferenceRuntime.from_loaded_bundle_metadata",
+        _raise_runtime_initialisation_failure,
+    )
+
+    with pytest.raises(RuntimeError, match="forced runtime initialisation failure"):
+        create_app()
