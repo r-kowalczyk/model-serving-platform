@@ -1,13 +1,22 @@
 [project]
-name = "REPLACE_WITH_PROJECT_NAME"
+name = "model-serving-platform"
 version = "0.1.0"
-description = "REPLACE_WITH_ONE_SENTENCE_DESCRIPTION"
+description = "Model serving platform"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "fastapi>=0.116.1",
+    "pydantic>=2.11.9",
+    "pydantic-settings>=2.11.0",
+    "uvicorn>=0.35.0",
+]
+
+[project.scripts]
+model-serving-platform = "model_serving_platform.main:run"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.0.1",
     "pytest-cov>=7.0.0",
     "ruff>=0.4.0",
