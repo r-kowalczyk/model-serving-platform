@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 8 status
+## Stage 9 status
 
-Stage 8 adds Prometheus-style runtime metrics and `/metrics` exposure.
+Stage 9 adds practical container-first runtime support with Docker and Compose.
 
 Included in this stage now:
 
@@ -37,6 +37,10 @@ Included in this stage now:
 - request count and latency metrics by endpoint and status.
 - prediction, external lookup, cache event, and fallback usage counters.
 - `GET /metrics` endpoint with explicit disabled-mode behaviour.
+- multi-stage Dockerfile with slim runtime image.
+- non-root container runtime user.
+- container healthcheck for `/healthz`.
+- local `compose.yaml` with read-only bundle mount and writable cache mount.
 - runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
 - startup precompute of base node embeddings and runtime summary metadata.
 - fake runtime fixtures used by service-layer tests for deterministic behaviour.
@@ -101,10 +105,37 @@ uv run ruff check .
 uv run mypy src tests
 ```
 
+## Docker runtime
+
+Build and run with Docker:
+
+```bash
+docker build -t model-serving-platform:stage9 .
+docker run --rm -p 8000:8000 \
+  -e MODEL_SERVING_BUNDLE_PATH=/app/bundles/graphsage \
+  -e MODEL_SERVING_CACHE_PATH=/app/cache \
+  -v "$(pwd)/bundles/graphsage:/app/bundles/graphsage:ro" \
+  -v "$(pwd)/cache:/app/cache" \
+  model-serving-platform:stage9
+```
+
+Run with Compose:
+
+```bash
+docker compose up --build
+```
+
+Container operation notes:
+
+- Bundle mount is read-only and treated as immutable model artefact storage.
+- Cache path is writable and kept separate from bundle files.
+- Healthcheck uses `GET /healthz`.
+- Startup still fails fast if bundle validation fails.
+
 ## Production-style scope statement
 
 This project demonstrates production-style serving engineering patterns.
-It is not presented as fully production-ready at Stage 6.
+It is not presented as fully production-ready at Stage 9.
 
 ## Licence
 

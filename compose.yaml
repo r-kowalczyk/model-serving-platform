@@ -1,0 +1,23 @@
+services:
+  model-serving-platform:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: model-serving-platform:stage9
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_SERVING_HOST: 0.0.0.0
+      MODEL_SERVING_PORT: 8000
+      MODEL_SERVING_BUNDLE_PATH: /app/bundles/graphsage
+      MODEL_SERVING_CACHE_PATH: /app/cache
+      MODEL_SERVING_METRICS_ENABLED: "true"
+    volumes:
+      - ./bundles/graphsage:/app/bundles/graphsage:ro
+      - ./cache:/app/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
