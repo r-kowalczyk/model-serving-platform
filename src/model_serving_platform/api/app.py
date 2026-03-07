@@ -26,6 +26,8 @@ from model_serving_platform.infrastructure.graphsage.runtime import (
     GraphSageInferenceRuntime,
 )
 from model_serving_platform.infrastructure.logging import configure_structured_logging
+from model_serving_platform.infrastructure.metrics import ServiceMetrics
+from model_serving_platform.api.routes.metrics import metrics_router
 
 app_logger = logging.getLogger("model_serving_platform.app")
 
@@ -51,6 +53,7 @@ def create_app(
         service_version=resolved_service_settings.service_version,
     )
     resolved_bundle_loader = graph_sage_bundle_loader or GraphSageBundleLoader()
+    service_metrics = ServiceMetrics(enabled=resolved_service_settings.metrics_enabled)
     application = FastAPI(
         title=resolved_service_settings.service_name,
         version=resolved_service_settings.service_version,
@@ -80,10 +83,12 @@ def create_app(
         timeout_seconds=resolved_service_settings.external_api_timeout_seconds,
         retry_count=resolved_service_settings.external_api_retry_count,
         retry_backoff_seconds=resolved_service_settings.external_api_retry_backoff_seconds,
+        service_metrics=service_metrics,
     )
     external_enrichment_client = CachingExternalEnrichmentClient(
         wrapped_external_enrichment_client=http_external_enrichment_client,
         cache_store=local_file_cache_store,
+        service_metrics=service_metrics,
     )
     resolved_inference_runtime = (
         inference_runtime
@@ -110,6 +115,7 @@ def create_app(
         readiness_reason=resolved_inference_runtime.initialisation_summary.readiness_reason,
     )
     application.state.service_settings = resolved_service_settings
+    application.state.service_metrics = service_metrics
     application.state.loaded_bundle_metadata = loaded_bundle_metadata
     application.state.inference_runtime = resolved_inference_runtime
     application.state.prediction_service = PredictionService(
@@ -119,14 +125,19 @@ def create_app(
         max_top_k=resolved_service_settings.max_top_k,
         default_attachment_strategy=resolved_service_settings.default_attachment_strategy,
         restricted_network_mode=resolved_service_settings.restricted_network_mode,
+        service_metrics=service_metrics,
     )
     application.state.runtime_initialisation_summary = (
         resolved_inference_runtime.initialisation_summary
     )
     application.state.startup_timestamp = datetime.now(UTC).isoformat()
 
-    application.add_middleware(RequestContextMiddleware)
+    application.add_middleware(
+        RequestContextMiddleware,
+        service_metrics=service_metrics,
+    )
     application.include_router(health_router)
     application.include_router(metadata_router)
     application.include_router(prediction_router)
+    application.include_router(metrics_router)
     return application

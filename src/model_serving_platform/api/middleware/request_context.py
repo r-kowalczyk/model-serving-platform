@@ -14,6 +14,7 @@ from model_serving_platform.infrastructure.logging.context import (
     reset_request_id,
     set_request_id,
 )
+from model_serving_platform.infrastructure.metrics import ServiceMetrics
 
 REQUEST_ID_HEADER_NAME = "X-Request-ID"
 request_context_logger = logging.getLogger("model_serving_platform.request")
@@ -27,7 +28,11 @@ class RequestContextMiddleware:
     Parameters: `app` is the downstream ASGI application instance.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        service_metrics: ServiceMetrics | None = None,
+    ) -> None:
         """Initialise middleware with downstream ASGI application reference.
 
         The ASGI application reference is required so middleware can delegate
@@ -36,6 +41,7 @@ class RequestContextMiddleware:
         """
 
         self._app = app
+        self._service_metrics = service_metrics
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Process HTTP request scope to set correlation and response headers.
@@ -84,6 +90,13 @@ class RequestContextMiddleware:
                         "latency_ms": (perf_counter() - request_start_time) * 1000,
                     },
                 )
+                if self._service_metrics is not None:
+                    self._service_metrics.observe_http_request(
+                        endpoint=str(scope.get("path")),
+                        method=str(scope.get("method")),
+                        status_code=int(message["status"]),
+                        latency_seconds=perf_counter() - request_start_time,
+                    )
             await send(message)
 
         try:
@@ -102,6 +115,13 @@ class RequestContextMiddleware:
                 status_code=500,
                 headers={REQUEST_ID_HEADER_NAME: request_id},
             )
+            if self._service_metrics is not None:
+                self._service_metrics.observe_http_request(
+                    endpoint=str(scope.get("path")),
+                    method=str(scope.get("method")),
+                    status_code=500,
+                    latency_seconds=perf_counter() - request_start_time,
+                )
             await error_response(scope, receive, send)
         finally:
             reset_request_id(request_id_token=request_id_token)

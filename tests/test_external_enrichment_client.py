@@ -15,6 +15,7 @@ from model_serving_platform.infrastructure.clients.enrichment import (
     _build_description_cache_key,
     _build_interaction_cache_key,
 )
+from model_serving_platform.infrastructure.metrics import ServiceMetrics
 
 
 def test_description_lookup_retries_and_succeeds_after_transient_failures() -> None:
@@ -439,3 +440,56 @@ def test_caching_wrapper_delegates_interaction_capability(tmp_path: Path) -> Non
     )
 
     assert caching_client.supports_interaction_strategy() is True
+
+
+def test_clients_record_metrics_when_metrics_collector_is_provided(
+    tmp_path: Path,
+) -> None:
+    """Verify enrichment and cache clients emit metrics when configured.
+
+    This test exercises metrics-enabled paths in both HTTP and cache wrappers
+    so external lookup and cache event counters are populated as expected.
+    Parameters: tmp_path is provided by pytest.
+    """
+
+    service_metrics = ServiceMetrics(enabled=True)
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        """Return deterministic payloads for description and interaction calls.
+
+        Payload values enable one success path per operation while allowing
+        cache wrapper to produce miss, write, and subsequent hit events.
+        Parameters: request is provided by HTTPX mock transport framework.
+        """
+
+        if "description" in str(request.url):
+            return httpx.Response(200, json={"description": "metrics-description"})
+        return httpx.Response(200, json={"partners": ["Node One"]})
+
+    wrapped_client = HttpExternalEnrichmentClient(
+        description_lookup_url="https://example.invalid/description",
+        interaction_lookup_url="https://example.invalid/partners",
+        timeout_seconds=0.01,
+        retry_count=0,
+        retry_backoff_seconds=0.0,
+        transport=httpx.MockTransport(mock_handler),
+        service_metrics=service_metrics,
+    )
+    cache_store = LocalFileCacheStore(
+        cache_directory_path=tmp_path / "metrics-cache",
+        ttl_seconds=3600.0,
+    )
+    caching_client = CachingExternalEnrichmentClient(
+        wrapped_external_enrichment_client=wrapped_client,
+        cache_store=cache_store,
+        service_metrics=service_metrics,
+    )
+
+    caching_client.lookup_entity_description(entity_name="Node Metrics")
+    caching_client.lookup_entity_description(entity_name="Node Metrics")
+    caching_client.lookup_interaction_partners(entity_name="Node Metrics")
+    caching_client.lookup_interaction_partners(entity_name="Node Metrics")
+
+    prometheus_payload = service_metrics.render_prometheus_text()
+    assert "model_serving_external_lookup_total" in prometheus_payload
+    assert "model_serving_cache_event_total" in prometheus_payload

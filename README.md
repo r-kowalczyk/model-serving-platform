@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 7 status
+## Stage 8 status
 
-Stage 7 adds deterministic local caching for enrichment lookups.
+Stage 8 adds Prometheus-style runtime metrics and `/metrics` exposure.
 
 Included in this stage now:
 
@@ -34,6 +34,9 @@ Included in this stage now:
 - cache abstraction with local file-backed cache implementation.
 - deterministic cache keys for description and interaction lookup requests.
 - configurable cache path and TTL for placing writable cache outside bundle directory.
+- request count and latency metrics by endpoint and status.
+- prediction, external lookup, cache event, and fallback usage counters.
+- `GET /metrics` endpoint with explicit disabled-mode behaviour.
 - runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
 - startup precompute of base node embeddings and runtime summary metadata.
 - fake runtime fixtures used by service-layer tests for deterministic behaviour.
@@ -88,6 +91,7 @@ Important startup rule:
 - Restricted-network mode requires caller-provided descriptions for unseen entities.
 - External enrichment failures are handled with explicit degraded fallback status values.
 - Enrichment lookups are cached with deterministic keys and TTL-based expiry.
+- Metrics collection can be enabled or disabled through environment settings.
 
 ## Quality checks
 

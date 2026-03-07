@@ -43,3 +43,4 @@ class ServiceSettings(BaseSettings):
     cache_backend: Literal["file"] = Field(default="file")
     cache_path: str = Field(default="./cache")
     cache_ttl_seconds: float = Field(default=3600.0, gt=0.0)
+    metrics_enabled: bool = Field(default=True)

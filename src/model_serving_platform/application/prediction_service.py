@@ -16,6 +16,7 @@ from model_serving_platform.domain.prediction import (
     PredictLinksResponse,
     PredictionItem,
 )
+from model_serving_platform.infrastructure.metrics import ServiceMetrics
 
 prediction_service_logger = logging.getLogger(
     "model_serving_platform.prediction_service"
@@ -65,6 +66,7 @@ class PredictionService:
         max_top_k: int,
         default_attachment_strategy: AttachmentStrategy,
         restricted_network_mode: bool = False,
+        service_metrics: ServiceMetrics | None = None,
     ) -> None:
         """Initialise the prediction orchestration service.
 
@@ -79,6 +81,7 @@ class PredictionService:
         self._max_top_k = max_top_k
         self._default_attachment_strategy = default_attachment_strategy
         self._restricted_network_mode = restricted_network_mode
+        self._service_metrics = service_metrics
 
     def predict_link(
         self, predict_link_request: PredictLinkRequest
@@ -132,6 +135,10 @@ class PredictionService:
         )
         request_latency_milliseconds = (perf_counter() - request_start_time) * 1000
         resolved_request_id = predict_link_request.request_id or str(uuid4())
+        if self._service_metrics is not None:
+            self._service_metrics.increment_prediction_count(
+                endpoint="/v1/predict-link"
+            )
         prediction_service_logger.info(
             "inference_complete",
             extra={
@@ -214,6 +221,10 @@ class PredictionService:
         )
         request_latency_milliseconds = (perf_counter() - request_start_time) * 1000
         resolved_request_id = predict_links_request.request_id or str(uuid4())
+        if self._service_metrics is not None:
+            self._service_metrics.increment_prediction_count(
+                endpoint="/v1/predict-links"
+            )
 
         if ranked_prediction_results:
             response_enrichment_status = ranked_prediction_results[0].enrichment_status
@@ -278,6 +289,10 @@ class PredictionService:
             resolved_attachment_strategy == "interaction"
             and not self._inference_runtime.supports_interaction_strategy()
         ):
+            if self._service_metrics is not None:
+                self._service_metrics.increment_fallback_usage(
+                    reason="interaction_strategy_unavailable"
+                )
             prediction_service_logger.info(
                 "fallback_used",
                 extra={

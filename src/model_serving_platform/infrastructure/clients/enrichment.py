@@ -11,6 +11,7 @@ from typing import Literal, Protocol, cast
 import httpx
 
 from model_serving_platform.infrastructure.cache.base import CacheStore
+from model_serving_platform.infrastructure.metrics import ServiceMetrics
 
 external_enrichment_client_logger = logging.getLogger(
     "model_serving_platform.external_enrichment_client"
@@ -96,6 +97,7 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         retry_count: int,
         retry_backoff_seconds: float,
         transport: httpx.BaseTransport | None = None,
+        service_metrics: ServiceMetrics | None = None,
     ) -> None:
         """Initialise HTTP client configuration for enrichment operations.
 
@@ -110,6 +112,7 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         self._retry_count = retry_count
         self._retry_backoff_seconds = retry_backoff_seconds
         self._http_client = httpx.Client(transport=transport)
+        self._service_metrics = service_metrics
 
     def lookup_entity_description(
         self, entity_name: str
@@ -122,6 +125,10 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         """
 
         if self._description_lookup_url is None:
+            self._record_external_lookup(
+                operation="entity_description_lookup",
+                outcome="unavailable",
+            )
             return EntityDescriptionLookupResult(
                 description=None,
                 outcome="unavailable",
@@ -132,16 +139,28 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
             operation_name="entity_description_lookup",
         )
         if response_payload is None:
+            self._record_external_lookup(
+                operation="entity_description_lookup",
+                outcome="failed",
+            )
             return EntityDescriptionLookupResult(
                 description=None,
                 outcome="failed",
             )
         resolved_description = response_payload.get("description")
         if isinstance(resolved_description, str) and resolved_description != "":
+            self._record_external_lookup(
+                operation="entity_description_lookup",
+                outcome="success",
+            )
             return EntityDescriptionLookupResult(
                 description=resolved_description,
                 outcome="success",
             )
+        self._record_external_lookup(
+            operation="entity_description_lookup",
+            outcome="not_found",
+        )
         return EntityDescriptionLookupResult(
             description=None,
             outcome="not_found",
@@ -158,6 +177,10 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         """
 
         if self._interaction_lookup_url is None:
+            self._record_external_lookup(
+                operation="interaction_partner_lookup",
+                outcome="unavailable",
+            )
             return InteractionPartnerLookupResult(
                 partner_entity_names=[],
                 outcome="unavailable",
@@ -168,12 +191,20 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
             operation_name="interaction_partner_lookup",
         )
         if response_payload is None:
+            self._record_external_lookup(
+                operation="interaction_partner_lookup",
+                outcome="failed",
+            )
             return InteractionPartnerLookupResult(
                 partner_entity_names=[],
                 outcome="failed",
             )
         raw_partner_names = response_payload.get("partners")
         if not isinstance(raw_partner_names, list):
+            self._record_external_lookup(
+                operation="interaction_partner_lookup",
+                outcome="not_found",
+            )
             return InteractionPartnerLookupResult(
                 partner_entity_names=[],
                 outcome="not_found",
@@ -184,10 +215,18 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
             if isinstance(partner_name, str)
         ]
         if len(partner_entity_names) == 0:
+            self._record_external_lookup(
+                operation="interaction_partner_lookup",
+                outcome="not_found",
+            )
             return InteractionPartnerLookupResult(
                 partner_entity_names=[],
                 outcome="not_found",
             )
+        self._record_external_lookup(
+            operation="interaction_partner_lookup",
+            outcome="success",
+        )
         return InteractionPartnerLookupResult(
             partner_entity_names=partner_entity_names,
             outcome="success",
@@ -202,6 +241,21 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         """
 
         return self._interaction_lookup_url is not None
+
+    def _record_external_lookup(self, operation: str, outcome: str) -> None:
+        """Record one external lookup metric when metrics collection is active.
+
+        This helper avoids duplicating conditional metrics checks in each
+        lookup branch while keeping operation and outcome labelling explicit.
+        Parameters: operation and outcome identify one lookup event.
+        """
+
+        if self._service_metrics is None:
+            return
+        self._service_metrics.increment_external_lookup(
+            operation=operation,
+            outcome=outcome,
+        )
 
     def _request_json_with_retries(
         self,
@@ -311,6 +365,7 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
         self,
         wrapped_external_enrichment_client: ExternalEnrichmentClient,
         cache_store: CacheStore,
+        service_metrics: ServiceMetrics | None = None,
     ) -> None:
         """Initialise cache wrapper around one enrichment client instance.
 
@@ -321,6 +376,7 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
 
         self._wrapped_external_enrichment_client = wrapped_external_enrichment_client
         self._cache_store = cache_store
+        self._service_metrics = service_metrics
 
     def lookup_entity_description(
         self, entity_name: str
@@ -344,6 +400,10 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
                     "cache_lookup_result",
                     extra={"cache_key": cache_key, "cache_outcome": "hit"},
                 )
+                self._record_cache_event(
+                    cache_name="entity_description_lookup",
+                    outcome="hit",
+                )
                 return EntityDescriptionLookupResult(
                     description=cached_description,
                     outcome=cast(
@@ -354,6 +414,10 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
         external_enrichment_client_logger.info(
             "cache_lookup_result",
             extra={"cache_key": cache_key, "cache_outcome": "miss"},
+        )
+        self._record_cache_event(
+            cache_name="entity_description_lookup",
+            outcome="miss",
         )
         lookup_result = (
             self._wrapped_external_enrichment_client.lookup_entity_description(
@@ -370,6 +434,10 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
         external_enrichment_client_logger.info(
             "cache_lookup_result",
             extra={"cache_key": cache_key, "cache_outcome": "write"},
+        )
+        self._record_cache_event(
+            cache_name="entity_description_lookup",
+            outcome="write",
         )
         return lookup_result
 
@@ -402,6 +470,10 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
                     "cache_lookup_result",
                     extra={"cache_key": cache_key, "cache_outcome": "hit"},
                 )
+                self._record_cache_event(
+                    cache_name="interaction_partner_lookup",
+                    outcome="hit",
+                )
                 return InteractionPartnerLookupResult(
                     partner_entity_names=partner_entity_names,
                     outcome=cast(
@@ -412,6 +484,10 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
         external_enrichment_client_logger.info(
             "cache_lookup_result",
             extra={"cache_key": cache_key, "cache_outcome": "miss"},
+        )
+        self._record_cache_event(
+            cache_name="interaction_partner_lookup",
+            outcome="miss",
         )
         lookup_result = (
             self._wrapped_external_enrichment_client.lookup_interaction_partners(
@@ -429,6 +505,10 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
             "cache_lookup_result",
             extra={"cache_key": cache_key, "cache_outcome": "write"},
         )
+        self._record_cache_event(
+            cache_name="interaction_partner_lookup",
+            outcome="write",
+        )
         return lookup_result
 
     def supports_interaction_strategy(self) -> bool:
@@ -440,6 +520,21 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
         """
 
         return self._wrapped_external_enrichment_client.supports_interaction_strategy()
+
+    def _record_cache_event(self, cache_name: str, outcome: str) -> None:
+        """Record cache event metric when metrics collection is enabled.
+
+        This helper centralises optional metrics checks while preserving cache
+        event semantics for hit, miss, and write instrumentation labels.
+        Parameters: cache_name and outcome define one cache metric event.
+        """
+
+        if self._service_metrics is None:
+            return
+        self._service_metrics.increment_cache_event(
+            cache_name=cache_name,
+            outcome=outcome,
+        )
 
 
 def _build_description_cache_key(entity_name: str) -> str:
