@@ -54,6 +54,16 @@ class FakeInferenceRuntime(InferenceRuntime):
 
         return list(self._known_entity_names)
 
+    def supports_interaction_strategy(self) -> bool:
+        """Return whether interaction strategy is available in fake runtime.
+
+        Tests can override this method to simulate degraded attachment paths
+        when external interaction lookups are unavailable in Stage 6.
+        Parameters: none.
+        """
+
+        return True
+
     def score_entity_pair(
         self,
         source_entity_name: str,

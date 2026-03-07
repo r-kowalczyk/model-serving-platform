@@ -17,6 +17,7 @@ from model_serving_platform.application.prediction_service import PredictionServ
 from model_serving_platform.application.service_state import ServiceRuntimeState
 from model_serving_platform.config.settings import ServiceSettings
 from model_serving_platform.infrastructure.bundles.loader import GraphSageBundleLoader
+from model_serving_platform.infrastructure.clients import HttpExternalEnrichmentClient
 from model_serving_platform.infrastructure.graphsage.runtime import (
     GraphSageInferenceRuntime,
 )
@@ -65,10 +66,19 @@ def create_app(
             "service_version": resolved_service_settings.service_version,
         },
     )
+    external_enrichment_client = HttpExternalEnrichmentClient(
+        description_lookup_url=resolved_service_settings.external_description_lookup_url,
+        interaction_lookup_url=resolved_service_settings.external_interaction_lookup_url,
+        timeout_seconds=resolved_service_settings.external_api_timeout_seconds,
+        retry_count=resolved_service_settings.external_api_retry_count,
+        retry_backoff_seconds=resolved_service_settings.external_api_retry_backoff_seconds,
+    )
     resolved_inference_runtime = (
         inference_runtime
         or GraphSageInferenceRuntime.from_loaded_bundle_metadata(
-            loaded_bundle_metadata=loaded_bundle_metadata
+            loaded_bundle_metadata=loaded_bundle_metadata,
+            external_enrichment_client=external_enrichment_client,
+            restricted_network_mode=resolved_service_settings.restricted_network_mode,
         )
     )
     app_logger.info(
@@ -96,6 +106,7 @@ def create_app(
         bundle_version=loaded_bundle_metadata.bundle_version,
         max_top_k=resolved_service_settings.max_top_k,
         default_attachment_strategy=resolved_service_settings.default_attachment_strategy,
+        restricted_network_mode=resolved_service_settings.restricted_network_mode,
     )
     application.state.runtime_initialisation_summary = (
         resolved_inference_runtime.initialisation_summary

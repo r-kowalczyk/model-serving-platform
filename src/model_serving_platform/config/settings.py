@@ -34,3 +34,9 @@ class ServiceSettings(BaseSettings):
     default_attachment_strategy: Literal["interaction", "cosine"] = Field(
         default="interaction"
     )
+    external_api_timeout_seconds: float = Field(default=2.0, gt=0.0)
+    external_api_retry_count: int = Field(default=2, ge=0)
+    external_api_retry_backoff_seconds: float = Field(default=0.2, ge=0.0)
+    restricted_network_mode: bool = Field(default=False)
+    external_description_lookup_url: str | None = Field(default=None)
+    external_interaction_lookup_url: str | None = Field(default=None)

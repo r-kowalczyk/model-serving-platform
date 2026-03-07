@@ -64,6 +64,14 @@ class InferenceRuntime(Protocol):
         Parameters: none.
         """
 
+    def supports_interaction_strategy(self) -> bool:
+        """Return whether interaction attachment path is currently available.
+
+        Prediction orchestration uses this value to degrade unavailable
+        strategies explicitly instead of failing silently at request time.
+        Parameters: none.
+        """
+
     def score_entity_pair(
         self,
         source_entity_name: str,

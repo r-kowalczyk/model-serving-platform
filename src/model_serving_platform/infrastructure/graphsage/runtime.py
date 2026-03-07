@@ -17,6 +17,11 @@ from model_serving_platform.application.inference_runtime import (
 from model_serving_platform.infrastructure.bundles.loader import (
     LoadedGraphSageBundleMetadata,
 )
+from model_serving_platform.infrastructure.clients.enrichment import (
+    ExternalEnrichmentClient,
+    InteractionPartnerLookupResult,
+    NoopExternalEnrichmentClient,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +56,8 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         node_name_to_node_id: dict[str, str],
         node_id_to_index: dict[str, int],
         precomputed_node_embeddings: NDArray[np.float64],
+        external_enrichment_client: ExternalEnrichmentClient,
+        restricted_network_mode: bool,
     ) -> None:
         """Initialise runtime with reconstructed model spec and embeddings.
 
@@ -63,6 +70,8 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         self._node_name_to_node_id = node_name_to_node_id
         self._node_id_to_index = node_id_to_index
         self._precomputed_node_embeddings = precomputed_node_embeddings
+        self._external_enrichment_client = external_enrichment_client
+        self._restricted_network_mode = restricted_network_mode
         self.initialisation_summary = RuntimeInitialisationSummary(
             runtime_name="graphsage",
             model_num_layers=model_reconstruction_spec.num_layers,
@@ -93,7 +102,10 @@ class GraphSageInferenceRuntime(InferenceRuntime):
 
     @classmethod
     def from_loaded_bundle_metadata(
-        cls, loaded_bundle_metadata: LoadedGraphSageBundleMetadata
+        cls,
+        loaded_bundle_metadata: LoadedGraphSageBundleMetadata,
+        external_enrichment_client: ExternalEnrichmentClient | None = None,
+        restricted_network_mode: bool = False,
     ) -> "GraphSageInferenceRuntime":
         """Construct runtime from bundle metadata and on-disk bundle artefacts.
 
@@ -122,7 +134,20 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             node_name_to_node_id=dict(manifest_payload["node_name_to_id"]),
             node_id_to_index=dict(manifest_payload["node_id_to_index"]),
             precomputed_node_embeddings=precomputed_node_embeddings,
+            external_enrichment_client=external_enrichment_client
+            or NoopExternalEnrichmentClient(),
+            restricted_network_mode=restricted_network_mode,
         )
+
+    def supports_interaction_strategy(self) -> bool:
+        """Return whether interaction enrichment dependency is available.
+
+        Service-level strategy resolution uses this capability check to apply
+        explicit degradation toward cosine when interaction lookups are absent.
+        Parameters: none.
+        """
+
+        return self._external_enrichment_client.supports_interaction_strategy()
 
     def score_entity_pair(
         self,
@@ -144,21 +169,21 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         if not source_entity_is_known and not target_entity_is_known:
             raise ValueError("Two unseen endpoints are not supported.")
 
-        source_vector = self._resolve_entity_embedding(
+        source_vector, source_enrichment_status = self._resolve_entity_embedding(
             entity_name=source_entity_name,
             entity_description=source_entity_description,
         )
-        target_vector = self._resolve_entity_embedding(
+        target_vector, target_enrichment_status = self._resolve_entity_embedding(
             entity_name=target_entity_name,
             entity_description=target_entity_description,
         )
         score_value = _cosine_similarity(
             source_vector=source_vector, target_vector=target_vector
         )
-        if source_entity_is_known and target_entity_is_known:
-            enrichment_status = "not_required"
-        else:
-            enrichment_status = "degraded_local_text"
+        enrichment_status = self._resolve_pair_enrichment_status(
+            source_enrichment_status=source_enrichment_status,
+            target_enrichment_status=target_enrichment_status,
+        )
         return RuntimePredictionResult(
             source_entity_name=source_entity_name,
             target_entity_name=target_entity_name,
@@ -182,13 +207,27 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         Parameters: entity names and top_k control ranked output entries.
         """
 
-        source_vector = self._resolve_entity_embedding(
+        source_vector, source_enrichment_status = self._resolve_entity_embedding(
             entity_name=source_entity_name,
             entity_description=source_entity_description,
         )
         scored_candidate_predictions: list[RuntimePredictionResult] = []
         source_entity_is_known = self.has_entity_name(entity_name=source_entity_name)
-        for candidate_entity_name in candidate_entity_names:
+        candidate_entity_names_for_scoring = candidate_entity_names
+        interaction_lookup_result: InteractionPartnerLookupResult | None = None
+        if not source_entity_is_known and attachment_strategy == "interaction":
+            interaction_lookup_result = (
+                self._external_enrichment_client.lookup_interaction_partners(
+                    entity_name=source_entity_name
+                )
+            )
+            candidate_entity_names_for_scoring = (
+                _filter_candidate_names_from_interactions(
+                    candidate_entity_names=candidate_entity_names,
+                    interaction_lookup_result=interaction_lookup_result,
+                )
+            )
+        for candidate_entity_name in candidate_entity_names_for_scoring:
             candidate_vector = self._resolve_existing_entity_embedding(
                 entity_name=candidate_entity_name
             )
@@ -205,7 +244,13 @@ class GraphSageInferenceRuntime(InferenceRuntime):
                     enrichment_status=(
                         "not_required"
                         if source_entity_is_known
-                        else "degraded_local_text"
+                        else _resolve_unseen_enrichment_status(
+                            base_enrichment_status=source_enrichment_status,
+                            attachment_strategy=attachment_strategy,
+                            interaction_lookup_result=interaction_lookup_result
+                            if attachment_strategy == "interaction"
+                            else None,
+                        )
                     ),
                 )
             )
@@ -233,7 +278,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
 
     def _resolve_entity_embedding(
         self, entity_name: str, entity_description: str | None
-    ) -> NDArray[np.float64]:
+    ) -> tuple[NDArray[np.float64], str]:
         """Resolve an embedding for known and unseen entity request paths.
 
         This function uses precomputed vectors for known nodes and a local
@@ -242,12 +287,73 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         """
 
         if self.has_entity_name(entity_name=entity_name):
-            return self._resolve_existing_entity_embedding(entity_name=entity_name)
-        return _build_unseen_entity_embedding(
-            entity_text=entity_description or entity_name,
-            output_dimension=self._model_reconstruction_spec.output_dimension,
-            attachment_seed=self._model_reconstruction_spec.num_layers,
+            return self._resolve_existing_entity_embedding(
+                entity_name=entity_name
+            ), "not_required"
+        if entity_description is not None:
+            return (
+                _build_unseen_entity_embedding(
+                    entity_text=entity_description,
+                    output_dimension=self._model_reconstruction_spec.output_dimension,
+                    attachment_seed=self._model_reconstruction_spec.num_layers,
+                ),
+                "caller_provided_description",
+            )
+        if self._restricted_network_mode:
+            raise ValueError(
+                "Restricted network mode requires caller-provided descriptions for unseen entities."
+            )
+        entity_description_lookup_result = (
+            self._external_enrichment_client.lookup_entity_description(
+                entity_name=entity_name
+            )
         )
+        if entity_description_lookup_result.description is not None:
+            return (
+                _build_unseen_entity_embedding(
+                    entity_text=entity_description_lookup_result.description,
+                    output_dimension=self._model_reconstruction_spec.output_dimension,
+                    attachment_seed=self._model_reconstruction_spec.num_layers,
+                ),
+                "external_lookup",
+            )
+        return (
+            _build_unseen_entity_embedding(
+                entity_text=entity_name,
+                output_dimension=self._model_reconstruction_spec.output_dimension,
+                attachment_seed=self._model_reconstruction_spec.num_layers,
+            ),
+            "degraded_local_text",
+        )
+
+    def _resolve_pair_enrichment_status(
+        self,
+        source_enrichment_status: str,
+        target_enrichment_status: str,
+    ) -> str:
+        """Resolve enrichment status for pair scoring after embedding resolution.
+
+        This status is returned to API clients so degraded enrichment behaviour
+        is explicit instead of silently blending into normal inference paths.
+        Parameters: source and target statuses come from embedding resolution.
+        """
+
+        if (
+            source_enrichment_status == "not_required"
+            and target_enrichment_status == "not_required"
+        ):
+            return "not_required"
+        if (
+            source_enrichment_status == "external_lookup"
+            or target_enrichment_status == "external_lookup"
+        ):
+            return "external_lookup"
+        if (
+            source_enrichment_status == "caller_provided_description"
+            or target_enrichment_status == "caller_provided_description"
+        ):
+            return "caller_provided_description"
+        return "degraded_local_text"
 
 
 def _build_model_reconstruction_spec(
@@ -269,6 +375,53 @@ def _build_model_reconstruction_spec(
         decoder_hidden_dimension=int(model_architecture["decoder_hidden_dim"]),
         num_layers=int(model_architecture["num_layers"]),
     )
+
+
+def _filter_candidate_names_from_interactions(
+    candidate_entity_names: list[str],
+    interaction_lookup_result: InteractionPartnerLookupResult,
+) -> list[str]:
+    """Filter candidates using interaction partner lookups when available.
+
+    Interaction lookup can reduce candidate pool for attachment strategy use,
+    but this function falls back to original candidates when no overlap exists.
+    Parameters: candidates and lookup results come from runtime scoring flow.
+    """
+
+    if interaction_lookup_result.outcome != "success":
+        return candidate_entity_names
+    interaction_partner_name_set = set(interaction_lookup_result.partner_entity_names)
+    filtered_candidate_entity_names = [
+        candidate_entity_name
+        for candidate_entity_name in candidate_entity_names
+        if candidate_entity_name in interaction_partner_name_set
+    ]
+    if len(filtered_candidate_entity_names) == 0:
+        return candidate_entity_names
+    return filtered_candidate_entity_names
+
+
+def _resolve_unseen_enrichment_status(
+    base_enrichment_status: str,
+    attachment_strategy: str,
+    interaction_lookup_result: InteractionPartnerLookupResult | None,
+) -> str:
+    """Resolve unseen enrichment status text for ranking request responses.
+
+    This function makes degraded interaction and fallback outcomes explicit in
+    API responses so operators can observe enrichment dependency behaviour.
+    Parameters: strategy and optional interaction lookup result define status.
+    """
+
+    if base_enrichment_status != "degraded_local_text":
+        return base_enrichment_status
+    if attachment_strategy != "interaction":
+        return base_enrichment_status
+    if interaction_lookup_result is None:
+        return base_enrichment_status
+    if interaction_lookup_result.outcome == "success":
+        return "interaction_lookup"
+    return "interaction_lookup_failed_fallback"
 
 
 def _precompute_base_node_embeddings(

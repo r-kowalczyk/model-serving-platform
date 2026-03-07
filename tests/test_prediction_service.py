@@ -4,7 +4,10 @@ from model_serving_platform.application.inference_runtime import (
     RuntimeInitialisationSummary,
     RuntimePredictionResult,
 )
-from model_serving_platform.application.prediction_service import PredictionService
+from model_serving_platform.application.prediction_service import (
+    MissingDescriptionForRestrictedNetworkError,
+    PredictionService,
+)
 from model_serving_platform.domain.prediction import (
     PredictLinkRequest,
     PredictLinksRequest,
@@ -71,6 +74,25 @@ class UnsupportedStrategyRuntime(FakeInferenceRuntime):
         )
 
 
+class NoInteractionRuntime(FakeInferenceRuntime):
+    """Fake runtime that reports no interaction support for fallback testing.
+
+    This runtime is used to verify explicit strategy fallback behaviour in
+    prediction service orchestration when interaction lookup is unavailable.
+    Parameters: this class uses inherited fake runtime initialisation.
+    """
+
+    def supports_interaction_strategy(self) -> bool:
+        """Return false to force service-level interaction strategy fallback.
+
+        The prediction service reads this capability and degrades unsupported
+        interaction requests toward cosine strategy with explicit signalling.
+        Parameters: none.
+        """
+
+        return False
+
+
 def test_predict_links_uses_empty_results_defaults() -> None:
     """Verify predict-links response defaults are used for empty results.
 
@@ -121,5 +143,153 @@ def test_predict_link_rejects_unsupported_runtime_attachment_strategy() -> None:
         )
     except ValueError as value_error:
         assert "unsupported attachment strategy" in str(value_error).lower()
+    else:
+        assert False
+
+
+def test_predict_links_uses_cosine_when_interaction_is_unavailable() -> None:
+    """Verify strategy fallback is applied when interaction is unavailable.
+
+    This test ensures service orchestration explicitly degrades interaction
+    requests to cosine and exposes fallback status in response payloads.
+    Parameters: none.
+    """
+
+    prediction_service = PredictionService(
+        inference_runtime=NoInteractionRuntime(),
+        service_version="0.1.0",
+        bundle_version="bundle-v1",
+        max_top_k=25,
+        default_attachment_strategy="interaction",
+    )
+
+    response = prediction_service.predict_links(
+        predict_links_request=PredictLinksRequest(
+            entity_name="Node One",
+            top_k=2,
+            attachment_strategy="interaction",
+        )
+    )
+
+    assert response.attachment_strategy_used == "cosine"
+    assert response.enrichment_status == "interaction_unavailable_fallback_to_cosine"
+
+
+def test_predict_link_requires_description_in_restricted_network_mode() -> None:
+    """Verify restricted mode rejects unseen pair requests without description.
+
+    This protects request handling in restricted environments by requiring
+    caller-provided descriptions for unseen entities at service layer.
+    Parameters: none.
+    """
+
+    prediction_service = PredictionService(
+        inference_runtime=FakeInferenceRuntime(),
+        service_version="0.1.0",
+        bundle_version="bundle-v1",
+        max_top_k=25,
+        default_attachment_strategy="interaction",
+        restricted_network_mode=True,
+    )
+
+    try:
+        prediction_service.predict_link(
+            predict_link_request=PredictLinkRequest(
+                entity_a_name="Node One",
+                entity_b_name="Unknown Node",
+            )
+        )
+    except MissingDescriptionForRestrictedNetworkError as restricted_network_error:
+        assert "entity_b_description" in str(restricted_network_error)
+    else:
+        assert False
+
+
+def test_predict_link_requires_entity_a_description_in_restricted_network_mode() -> (
+    None
+):
+    """Verify restricted mode requires description for unseen entity_a values.
+
+    This test covers the branch where endpoint A is unseen and endpoint B is
+    known, requiring caller-provided entity_a_description in restricted mode.
+    Parameters: none.
+    """
+
+    prediction_service = PredictionService(
+        inference_runtime=FakeInferenceRuntime(),
+        service_version="0.1.0",
+        bundle_version="bundle-v1",
+        max_top_k=25,
+        default_attachment_strategy="interaction",
+        restricted_network_mode=True,
+    )
+
+    try:
+        prediction_service.predict_link(
+            predict_link_request=PredictLinkRequest(
+                entity_a_name="Unknown Node",
+                entity_b_name="Node One",
+            )
+        )
+    except MissingDescriptionForRestrictedNetworkError as restricted_network_error:
+        assert "entity_a_description" in str(restricted_network_error)
+    else:
+        assert False
+
+
+def test_predict_link_marks_strategy_fallback_when_interaction_unavailable() -> None:
+    """Verify predict-link reports interaction-to-cosine strategy fallback.
+
+    This test ensures single-pair responses expose fallback metadata when
+    interaction strategy is requested but unavailable in runtime capability.
+    Parameters: none.
+    """
+
+    prediction_service = PredictionService(
+        inference_runtime=NoInteractionRuntime(),
+        service_version="0.1.0",
+        bundle_version="bundle-v1",
+        max_top_k=25,
+        default_attachment_strategy="interaction",
+    )
+
+    response = prediction_service.predict_link(
+        predict_link_request=PredictLinkRequest(
+            entity_a_name="Node One",
+            entity_b_name="Node Two",
+            attachment_strategy="interaction",
+        )
+    )
+
+    assert response.attachment_strategy_used == "cosine"
+    assert response.enrichment_status == "interaction_unavailable_fallback_to_cosine"
+
+
+def test_predict_links_requires_description_in_restricted_network_mode() -> None:
+    """Verify restricted mode rejects unseen ranking source without description.
+
+    Ranking requests must include entity_description for unseen sources when
+    restricted network mode is enabled and external lookup is unavailable.
+    Parameters: none.
+    """
+
+    prediction_service = PredictionService(
+        inference_runtime=FakeInferenceRuntime(),
+        service_version="0.1.0",
+        bundle_version="bundle-v1",
+        max_top_k=25,
+        default_attachment_strategy="interaction",
+        restricted_network_mode=True,
+    )
+
+    try:
+        prediction_service.predict_links(
+            predict_links_request=PredictLinksRequest(
+                entity_name="Unknown Source",
+                top_k=2,
+            )
+        )
+    except MissingDescriptionForRestrictedNetworkError as restricted_network_error:
+        assert "entity_description" in str(restricted_network_error)
     else:
         assert False

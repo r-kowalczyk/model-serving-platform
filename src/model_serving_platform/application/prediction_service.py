@@ -40,6 +40,15 @@ class TopKLimitExceededError(ValueError):
     """
 
 
+class MissingDescriptionForRestrictedNetworkError(ValueError):
+    """Raise when unseen entities omit descriptions in restricted mode.
+
+    Restricted-network mode disables external enrichment assumptions, so
+    unseen entities must include caller-provided descriptions by contract.
+    Parameters: this exception uses a fixed human-readable message.
+    """
+
+
 class PredictionService:
     """Coordinate request-level prediction behaviour outside route handlers.
 
@@ -55,6 +64,7 @@ class PredictionService:
         bundle_version: str | None,
         max_top_k: int,
         default_attachment_strategy: AttachmentStrategy,
+        restricted_network_mode: bool = False,
     ) -> None:
         """Initialise the prediction orchestration service.
 
@@ -68,6 +78,7 @@ class PredictionService:
         self._bundle_version = bundle_version
         self._max_top_k = max_top_k
         self._default_attachment_strategy = default_attachment_strategy
+        self._restricted_network_mode = restricted_network_mode
 
     def predict_link(
         self, predict_link_request: PredictLinkRequest
@@ -90,8 +101,26 @@ class PredictionService:
             raise TwoUnseenEndpointsError(
                 "Pair predictions do not support two unseen endpoints in v1."
             )
+        if self._restricted_network_mode:
+            if (
+                not source_entity_is_known
+                and predict_link_request.entity_a_description is None
+            ):
+                raise MissingDescriptionForRestrictedNetworkError(
+                    "Restricted network mode requires entity_a_description for unseen entities."
+                )
+            if (
+                not target_entity_is_known
+                and predict_link_request.entity_b_description is None
+            ):
+                raise MissingDescriptionForRestrictedNetworkError(
+                    "Restricted network mode requires entity_b_description for unseen entities."
+                )
 
-        resolved_attachment_strategy = self._resolve_attachment_strategy(
+        (
+            resolved_attachment_strategy,
+            strategy_fallback_was_used,
+        ) = self._resolve_attachment_strategy(
             requested_attachment_strategy=predict_link_request.attachment_strategy
         )
         runtime_prediction_result = self._inference_runtime.score_entity_pair(
@@ -113,8 +142,14 @@ class PredictionService:
                 "bundle_version": self._bundle_version,
                 "service_version": self._service_version,
                 "request_id": resolved_request_id,
+                "fallback_used": strategy_fallback_was_used,
             },
         )
+
+        if strategy_fallback_was_used:
+            response_enrichment_status = "interaction_unavailable_fallback_to_cosine"
+        else:
+            response_enrichment_status = runtime_prediction_result.enrichment_status
 
         return PredictLinkResponse(
             score=runtime_prediction_result.score,
@@ -124,7 +159,7 @@ class PredictionService:
             attachment_strategy_used=self._normalise_attachment_strategy(
                 attachment_strategy=runtime_prediction_result.attachment_strategy_used
             ),
-            enrichment_status=runtime_prediction_result.enrichment_status,
+            enrichment_status=response_enrichment_status,
             latency_ms=request_latency_milliseconds,
             request_id=resolved_request_id,
         )
@@ -144,8 +179,22 @@ class PredictionService:
             raise TopKLimitExceededError(
                 f"Requested top_k exceeds configured max_top_k={self._max_top_k}."
             )
+        source_entity_is_known = self._inference_runtime.has_entity_name(
+            predict_links_request.entity_name
+        )
+        if (
+            self._restricted_network_mode
+            and not source_entity_is_known
+            and predict_links_request.entity_description is None
+        ):
+            raise MissingDescriptionForRestrictedNetworkError(
+                "Restricted network mode requires entity_description for unseen entities."
+            )
 
-        resolved_attachment_strategy = self._resolve_attachment_strategy(
+        (
+            resolved_attachment_strategy,
+            strategy_fallback_was_used,
+        ) = self._resolve_attachment_strategy(
             requested_attachment_strategy=predict_links_request.attachment_strategy
         )
         known_entity_names = self._inference_runtime.get_known_entity_names()
@@ -176,6 +225,8 @@ class PredictionService:
         else:
             response_enrichment_status = "not_required"
             attachment_strategy_used = resolved_attachment_strategy
+        if strategy_fallback_was_used:
+            response_enrichment_status = "interaction_unavailable_fallback_to_cosine"
 
         prediction_service_logger.info(
             "inference_complete",
@@ -188,6 +239,7 @@ class PredictionService:
                 "bundle_version": self._bundle_version,
                 "service_version": self._service_version,
                 "request_id": resolved_request_id,
+                "fallback_used": strategy_fallback_was_used,
             },
         )
 
@@ -210,7 +262,7 @@ class PredictionService:
 
     def _resolve_attachment_strategy(
         self, requested_attachment_strategy: AttachmentStrategy | None
-    ) -> AttachmentStrategy:
+    ) -> tuple[AttachmentStrategy, bool]:
         """Resolve request attachment strategy with configuration defaults.
 
         This helper keeps defaulting behaviour consistent across endpoints and
@@ -219,8 +271,23 @@ class PredictionService:
         """
 
         if requested_attachment_strategy is not None:
-            return requested_attachment_strategy
-        return self._default_attachment_strategy
+            resolved_attachment_strategy = requested_attachment_strategy
+        else:
+            resolved_attachment_strategy = self._default_attachment_strategy
+        if (
+            resolved_attachment_strategy == "interaction"
+            and not self._inference_runtime.supports_interaction_strategy()
+        ):
+            prediction_service_logger.info(
+                "fallback_used",
+                extra={
+                    "fallback_reason": "interaction_strategy_unavailable",
+                    "fallback_from_strategy": "interaction",
+                    "fallback_to_strategy": "cosine",
+                },
+            )
+            return "cosine", True
+        return resolved_attachment_strategy, False
 
     def _normalise_attachment_strategy(
         self, attachment_strategy: str

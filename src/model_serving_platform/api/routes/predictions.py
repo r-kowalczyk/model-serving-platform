@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, status
 
 from model_serving_platform.application.prediction_service import (
+    MissingDescriptionForRestrictedNetworkError,
     PredictionService,
     TopKLimitExceededError,
     TwoUnseenEndpointsError,
@@ -52,6 +53,18 @@ def predict_link(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(two_unseen_endpoints_error),
         ) from two_unseen_endpoints_error
+    except MissingDescriptionForRestrictedNetworkError as missing_description_error:
+        prediction_router_logger.warning(
+            "prediction_request_rejected",
+            extra={
+                "endpoint": "/v1/predict-link",
+                "error_type": "missing_description_for_restricted_network",
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(missing_description_error),
+        ) from missing_description_error
 
 
 @prediction_router.post("/predict-links", response_model=PredictLinksResponse)
@@ -86,3 +99,15 @@ def predict_links(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(top_k_limit_exceeded_error),
         ) from top_k_limit_exceeded_error
+    except MissingDescriptionForRestrictedNetworkError as missing_description_error:
+        prediction_router_logger.warning(
+            "prediction_request_rejected",
+            extra={
+                "endpoint": "/v1/predict-links",
+                "error_type": "missing_description_for_restricted_network",
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(missing_description_error),
+        ) from missing_description_error

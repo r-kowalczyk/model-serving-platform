@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 5 status
+## Stage 6 status
 
-Stage 5 adds structured JSON logging and request correlation middleware.
+Stage 6 adds external enrichment clients with timeout, retry, and fallback.
 
 Included in this stage now:
 
@@ -27,6 +27,10 @@ Included in this stage now:
 - structured JSON logging with request correlation context.
 - `X-Request-ID` propagation for all HTTP responses.
 - request lifecycle logs for receive, complete, and failure paths.
+- external enrichment client abstraction and concrete HTTP implementation.
+- configurable timeout, retry count, and bounded backoff for HTTP enrichment calls.
+- explicit restricted-network mode that requires caller descriptions for unseen entities.
+- explicit interaction-strategy degradation to cosine when interaction lookup is unavailable.
 - runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
 - startup precompute of base node embeddings and runtime summary metadata.
 - fake runtime fixtures used by service-layer tests for deterministic behaviour.
@@ -78,6 +82,8 @@ Important startup rule:
 - Readiness depends on both successful bundle validation and runtime initialisation.
 - Pair predictions reject requests where both endpoints are unseen in v1.
 - Prediction responses include request identifiers that align with request correlation headers.
+- Restricted-network mode requires caller-provided descriptions for unseen entities.
+- External enrichment failures are handled with explicit degraded fallback status values.
 
 ## Quality checks
 
@@ -90,7 +96,7 @@ uv run mypy src tests
 ## Production-style scope statement
 
 This project demonstrates production-style serving engineering patterns.
-It is not presented as fully production-ready at Stage 2.
+It is not presented as fully production-ready at Stage 6.
 
 ## Licence
 
