@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 9 status
+## Stage 10 status
 
-Stage 9 adds practical container-first runtime support with Docker and Compose.
+Stage 10 adds integration smoke coverage and final v1 cleanup notes.
 
 Included in this stage now:
 
@@ -41,6 +41,7 @@ Included in this stage now:
 - non-root container runtime user.
 - container healthcheck for `/healthz`.
 - local `compose.yaml` with read-only bundle mount and writable cache mount.
+- CI-friendly smoke path that boots app and exercises happy endpoints.
 - runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
 - startup precompute of base node embeddings and runtime summary metadata.
 - fake runtime fixtures used by service-layer tests for deterministic behaviour.
@@ -105,6 +106,12 @@ uv run ruff check .
 uv run mypy src tests
 ```
 
+Run a focused smoke path:
+
+```bash
+uv run pytest tests/test_smoke_happy_path.py
+```
+
 ## Docker runtime
 
 Build and run with Docker:
@@ -135,7 +142,18 @@ Container operation notes:
 ## Production-style scope statement
 
 This project demonstrates production-style serving engineering patterns.
-It is not presented as fully production-ready at Stage 9.
+It is not presented as fully production-ready at Stage 10.
+
+## Explicit v1 limitations
+
+- GraphSAGE-only support in v1.
+- Synchronous request-time inference only.
+- Local runtime components only.
+- No authentication or authorisation.
+- No rate limiting.
+- No distributed cache.
+- No asynchronous job queue.
+- External enrichment can remain in request path.
 
 ## Licence
 
