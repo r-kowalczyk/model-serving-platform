@@ -17,7 +17,11 @@ from model_serving_platform.application.prediction_service import PredictionServ
 from model_serving_platform.application.service_state import ServiceRuntimeState
 from model_serving_platform.config.settings import ServiceSettings
 from model_serving_platform.infrastructure.bundles.loader import GraphSageBundleLoader
-from model_serving_platform.infrastructure.clients import HttpExternalEnrichmentClient
+from model_serving_platform.infrastructure.cache import LocalFileCacheStore
+from model_serving_platform.infrastructure.clients import (
+    CachingExternalEnrichmentClient,
+    HttpExternalEnrichmentClient,
+)
 from model_serving_platform.infrastructure.graphsage.runtime import (
     GraphSageInferenceRuntime,
 )
@@ -66,12 +70,20 @@ def create_app(
             "service_version": resolved_service_settings.service_version,
         },
     )
-    external_enrichment_client = HttpExternalEnrichmentClient(
+    local_file_cache_store = LocalFileCacheStore(
+        cache_directory_path=Path(resolved_service_settings.cache_path),
+        ttl_seconds=resolved_service_settings.cache_ttl_seconds,
+    )
+    http_external_enrichment_client = HttpExternalEnrichmentClient(
         description_lookup_url=resolved_service_settings.external_description_lookup_url,
         interaction_lookup_url=resolved_service_settings.external_interaction_lookup_url,
         timeout_seconds=resolved_service_settings.external_api_timeout_seconds,
         retry_count=resolved_service_settings.external_api_retry_count,
         retry_backoff_seconds=resolved_service_settings.external_api_retry_backoff_seconds,
+    )
+    external_enrichment_client = CachingExternalEnrichmentClient(
+        wrapped_external_enrichment_client=http_external_enrichment_client,
+        cache_store=local_file_cache_store,
     )
     resolved_inference_runtime = (
         inference_runtime

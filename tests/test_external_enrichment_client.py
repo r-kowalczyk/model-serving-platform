@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 
+from model_serving_platform.infrastructure.cache.local_file_cache import (
+    LocalFileCacheStore,
+)
 from model_serving_platform.infrastructure.clients.enrichment import (
+    CachingExternalEnrichmentClient,
     HttpExternalEnrichmentClient,
+    _build_description_cache_key,
+    _build_interaction_cache_key,
 )
 
 
@@ -285,3 +293,149 @@ def test_interaction_lookup_returns_not_found_when_partner_list_has_no_strings()
 
     assert lookup_result.outcome == "not_found"
     assert lookup_result.partner_entity_names == []
+
+
+def test_caching_wrapper_returns_hit_without_second_external_call(
+    tmp_path: Path,
+) -> None:
+    """Verify repeated description lookups reuse cached value and skip HTTP.
+
+    This test confirms cache wrapper behaviour for description lookups by
+    asserting external transport call count does not increase on repeat calls.
+    Parameters: tmp_path is provided by pytest.
+    """
+
+    request_attempt_counter = {"count": 0}
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        """Return deterministic description payload and count HTTP attempts.
+
+        Attempt counting proves cache hit behaviour because only first lookup
+        should call transport while second lookup should use stored cache data.
+        Parameters: request is provided by HTTPX mock transport framework.
+        """
+
+        _ = request
+        request_attempt_counter["count"] += 1
+        return httpx.Response(200, json={"description": "cached-description"})
+
+    wrapped_client = HttpExternalEnrichmentClient(
+        description_lookup_url="https://example.invalid/description",
+        interaction_lookup_url=None,
+        timeout_seconds=0.01,
+        retry_count=0,
+        retry_backoff_seconds=0.0,
+        transport=httpx.MockTransport(mock_handler),
+    )
+    cache_store = LocalFileCacheStore(
+        cache_directory_path=tmp_path / "description-cache",
+        ttl_seconds=3600.0,
+    )
+    caching_client = CachingExternalEnrichmentClient(
+        wrapped_external_enrichment_client=wrapped_client,
+        cache_store=cache_store,
+    )
+
+    first_lookup_result = caching_client.lookup_entity_description(entity_name="Node A")
+    second_lookup_result = caching_client.lookup_entity_description(
+        entity_name="Node A"
+    )
+
+    assert request_attempt_counter["count"] == 1
+    assert first_lookup_result.description == "cached-description"
+    assert second_lookup_result.description == "cached-description"
+
+
+def test_caching_wrapper_caches_interaction_lookup_results(tmp_path: Path) -> None:
+    """Verify interaction lookups are cached for deterministic repeated calls.
+
+    This test confirms cache wrapper stores interaction partner responses and
+    prevents repeated external calls for identical entity name lookups.
+    Parameters: tmp_path is provided by pytest.
+    """
+
+    request_attempt_counter = {"count": 0}
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        """Return interaction payload while counting transport calls.
+
+        Counting call attempts demonstrates cache reuse for repeated lookups
+        because only the first request should reach this HTTP mock handler.
+        Parameters: request is provided by HTTPX mock transport framework.
+        """
+
+        _ = request
+        request_attempt_counter["count"] += 1
+        return httpx.Response(200, json={"partners": ["Node One"]})
+
+    wrapped_client = HttpExternalEnrichmentClient(
+        description_lookup_url=None,
+        interaction_lookup_url="https://example.invalid/partners",
+        timeout_seconds=0.01,
+        retry_count=0,
+        retry_backoff_seconds=0.0,
+        transport=httpx.MockTransport(mock_handler),
+    )
+    cache_store = LocalFileCacheStore(
+        cache_directory_path=tmp_path / "interaction-cache",
+        ttl_seconds=3600.0,
+    )
+    caching_client = CachingExternalEnrichmentClient(
+        wrapped_external_enrichment_client=wrapped_client,
+        cache_store=cache_store,
+    )
+
+    first_lookup_result = caching_client.lookup_interaction_partners(
+        entity_name="Node B"
+    )
+    second_lookup_result = caching_client.lookup_interaction_partners(
+        entity_name="Node B"
+    )
+
+    assert request_attempt_counter["count"] == 1
+    assert first_lookup_result.partner_entity_names == ["Node One"]
+    assert second_lookup_result.partner_entity_names == ["Node One"]
+
+
+def test_cache_key_builders_are_deterministic_for_normalised_inputs() -> None:
+    """Verify cache keys are deterministic for normalised equivalent inputs.
+
+    Deterministic keys are required so equivalent entity strings with case and
+    whitespace differences reuse the same cache records and avoid duplicates.
+    Parameters: none.
+    """
+
+    description_key_a = _build_description_cache_key(entity_name=" Node X ")
+    description_key_b = _build_description_cache_key(entity_name="node x")
+    interaction_key_a = _build_interaction_cache_key(entity_name=" Node X ")
+    interaction_key_b = _build_interaction_cache_key(entity_name="node x")
+
+    assert description_key_a == description_key_b
+    assert interaction_key_a == interaction_key_b
+
+
+def test_caching_wrapper_delegates_interaction_capability(tmp_path: Path) -> None:
+    """Verify cache wrapper preserves wrapped client interaction capability.
+
+    Capability checks drive strategy fallback logic, so cache wrapper must
+    return wrapped-client support flags without changing their semantics.
+    Parameters: none.
+    """
+
+    wrapped_client = HttpExternalEnrichmentClient(
+        description_lookup_url=None,
+        interaction_lookup_url="https://example.invalid/partners",
+        timeout_seconds=0.01,
+        retry_count=0,
+        retry_backoff_seconds=0.0,
+    )
+    cache_store = LocalFileCacheStore(
+        cache_directory_path=tmp_path / "capability-cache",
+        ttl_seconds=60.0,
+    )
+    caching_client = CachingExternalEnrichmentClient(
+        wrapped_external_enrichment_client=wrapped_client,
+        cache_store=cache_store,
+    )
+
+    assert caching_client.supports_interaction_strategy() is True

@@ -11,9 +11,9 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 6 status
+## Stage 7 status
 
-Stage 6 adds external enrichment clients with timeout, retry, and fallback.
+Stage 7 adds deterministic local caching for enrichment lookups.
 
 Included in this stage now:
 
@@ -31,6 +31,9 @@ Included in this stage now:
 - configurable timeout, retry count, and bounded backoff for HTTP enrichment calls.
 - explicit restricted-network mode that requires caller descriptions for unseen entities.
 - explicit interaction-strategy degradation to cosine when interaction lookup is unavailable.
+- cache abstraction with local file-backed cache implementation.
+- deterministic cache keys for description and interaction lookup requests.
+- configurable cache path and TTL for placing writable cache outside bundle directory.
 - runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
 - startup precompute of base node embeddings and runtime summary metadata.
 - fake runtime fixtures used by service-layer tests for deterministic behaviour.
@@ -84,6 +87,7 @@ Important startup rule:
 - Prediction responses include request identifiers that align with request correlation headers.
 - Restricted-network mode requires caller-provided descriptions for unseen entities.
 - External enrichment failures are handled with explicit degraded fallback status values.
+- Enrichment lookups are cached with deterministic keys and TTL-based expiry.
 
 ## Quality checks
 

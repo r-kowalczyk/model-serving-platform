@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from hashlib import sha256
 from time import sleep
 from typing import Literal, Protocol, cast
 
 import httpx
+
+from model_serving_platform.infrastructure.cache.base import CacheStore
 
 external_enrichment_client_logger = logging.getLogger(
     "model_serving_platform.external_enrichment_client"
@@ -294,3 +297,170 @@ class NoopExternalEnrichmentClient(ExternalEnrichmentClient):
         """
 
         return False
+
+
+class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
+    """Cache wrapper for enrichment client lookups with deterministic keys.
+
+    The wrapper keeps caching concerns outside HTTP transport code and enables
+    repeated enrichment calls to avoid unnecessary external dependency latency.
+    Parameters: wrapped client and cache store are injected at startup.
+    """
+
+    def __init__(
+        self,
+        wrapped_external_enrichment_client: ExternalEnrichmentClient,
+        cache_store: CacheStore,
+    ) -> None:
+        """Initialise cache wrapper around one enrichment client instance.
+
+        Composition is used so the same cache behaviour can wrap different
+        client implementations without modifying underlying lookup code.
+        Parameters: wrapped client executes misses and cache stores results.
+        """
+
+        self._wrapped_external_enrichment_client = wrapped_external_enrichment_client
+        self._cache_store = cache_store
+
+    def lookup_entity_description(
+        self, entity_name: str
+    ) -> EntityDescriptionLookupResult:
+        """Lookup entity description with cache hit, miss, and write behaviour.
+
+        Cache entries are keyed deterministically from entity name so repeated
+        unseen requests are consistent and avoid repeated external calls.
+        Parameters: entity_name identifies one description lookup request.
+        """
+
+        cache_key = _build_description_cache_key(entity_name=entity_name)
+        cached_entry = self._cache_store.get(cache_key=cache_key)
+        if cached_entry is not None:
+            cached_description = cached_entry.payload.get("description")
+            cached_outcome = cached_entry.payload.get("outcome")
+            if isinstance(cached_outcome, str) and (
+                isinstance(cached_description, str) or cached_description is None
+            ):
+                external_enrichment_client_logger.info(
+                    "cache_lookup_result",
+                    extra={"cache_key": cache_key, "cache_outcome": "hit"},
+                )
+                return EntityDescriptionLookupResult(
+                    description=cached_description,
+                    outcome=cast(
+                        Literal["success", "not_found", "failed", "unavailable"],
+                        cached_outcome,
+                    ),
+                )
+        external_enrichment_client_logger.info(
+            "cache_lookup_result",
+            extra={"cache_key": cache_key, "cache_outcome": "miss"},
+        )
+        lookup_result = (
+            self._wrapped_external_enrichment_client.lookup_entity_description(
+                entity_name=entity_name
+            )
+        )
+        self._cache_store.set(
+            cache_key=cache_key,
+            payload={
+                "description": lookup_result.description,
+                "outcome": lookup_result.outcome,
+            },
+        )
+        external_enrichment_client_logger.info(
+            "cache_lookup_result",
+            extra={"cache_key": cache_key, "cache_outcome": "write"},
+        )
+        return lookup_result
+
+    def lookup_interaction_partners(
+        self, entity_name: str
+    ) -> InteractionPartnerLookupResult:
+        """Lookup interaction partners with deterministic cache read and write.
+
+        Partner lookup caching reduces repeated external calls for frequent
+        entities and keeps fallback outcomes stable across repeated requests.
+        Parameters: entity_name identifies one interaction lookup request.
+        """
+
+        cache_key = _build_interaction_cache_key(entity_name=entity_name)
+        cached_entry = self._cache_store.get(cache_key=cache_key)
+        if cached_entry is not None:
+            cached_partner_entity_names = cached_entry.payload.get(
+                "partner_entity_names"
+            )
+            cached_outcome = cached_entry.payload.get("outcome")
+            if isinstance(cached_partner_entity_names, list) and isinstance(
+                cached_outcome, str
+            ):
+                partner_entity_names = [
+                    partner_name
+                    for partner_name in cached_partner_entity_names
+                    if isinstance(partner_name, str)
+                ]
+                external_enrichment_client_logger.info(
+                    "cache_lookup_result",
+                    extra={"cache_key": cache_key, "cache_outcome": "hit"},
+                )
+                return InteractionPartnerLookupResult(
+                    partner_entity_names=partner_entity_names,
+                    outcome=cast(
+                        Literal["success", "not_found", "failed", "unavailable"],
+                        cached_outcome,
+                    ),
+                )
+        external_enrichment_client_logger.info(
+            "cache_lookup_result",
+            extra={"cache_key": cache_key, "cache_outcome": "miss"},
+        )
+        lookup_result = (
+            self._wrapped_external_enrichment_client.lookup_interaction_partners(
+                entity_name=entity_name
+            )
+        )
+        self._cache_store.set(
+            cache_key=cache_key,
+            payload={
+                "partner_entity_names": lookup_result.partner_entity_names,
+                "outcome": lookup_result.outcome,
+            },
+        )
+        external_enrichment_client_logger.info(
+            "cache_lookup_result",
+            extra={"cache_key": cache_key, "cache_outcome": "write"},
+        )
+        return lookup_result
+
+    def supports_interaction_strategy(self) -> bool:
+        """Return wrapped client interaction capability without modification.
+
+        Capability reporting is delegated to wrapped client because caching
+        does not affect whether interaction endpoint dependencies are present.
+        Parameters: none.
+        """
+
+        return self._wrapped_external_enrichment_client.supports_interaction_strategy()
+
+
+def _build_description_cache_key(entity_name: str) -> str:
+    """Build deterministic cache key for one entity description lookup.
+
+    Keys include operation namespace and normalised entity text to ensure
+    cache records are stable across repeated requests with same logical input.
+    Parameters: entity_name is source value for key derivation.
+    """
+
+    normalised_entity_name = entity_name.strip().lower()
+    return "description:" + sha256(normalised_entity_name.encode("utf-8")).hexdigest()
+
+
+def _build_interaction_cache_key(entity_name: str) -> str:
+    """Build deterministic cache key for one interaction partner lookup.
+
+    Keys include operation namespace and normalised entity text to separate
+    interaction results cleanly from description lookup cache records.
+    Parameters: entity_name is source value for key derivation.
+    """
+
+    normalised_entity_name = entity_name.strip().lower()
+    return "interaction:" + sha256(normalised_entity_name.encode("utf-8")).hexdigest()

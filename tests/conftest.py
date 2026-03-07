@@ -32,6 +32,10 @@ def configured_bundle_environment(
     """
 
     monkeypatch.setenv("MODEL_SERVING_BUNDLE_PATH", str(valid_bundle_directory_path))
+    monkeypatch.setenv(
+        "MODEL_SERVING_CACHE_PATH",
+        str(valid_bundle_directory_path.parent / "cache"),
+    )
 
 
 @pytest.fixture()

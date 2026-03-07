@@ -40,3 +40,6 @@ class ServiceSettings(BaseSettings):
     restricted_network_mode: bool = Field(default=False)
     external_description_lookup_url: str | None = Field(default=None)
     external_interaction_lookup_url: str | None = Field(default=None)
+    cache_backend: Literal["file"] = Field(default="file")
+    cache_path: str = Field(default="./cache")
+    cache_ttl_seconds: float = Field(default=3600.0, gt=0.0)
