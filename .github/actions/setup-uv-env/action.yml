@@ -1,0 +1,17 @@
+name: Setup uv environment
+description: Set up uv and the requested Python version for this workflow.
+
+inputs:
+  python-version:
+    description: Python version to install and expose to uv.
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+
+

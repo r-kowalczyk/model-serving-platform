@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: pytest
+        name: Run pytest with coverage
+        entry: uv run pytest --cov=src --cov-report=term-missing --cov-fail-under=100
+        language: system
+        pass_filenames: false
+      - id: ruff-lint
+        name: Run ruff linting
+        entry: uv run ruff check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: Run ruff formatting
+        entry: uv run ruff format
+        language: system
+        types: [python]
+      - id: mypy
+        name: Run mypy type checking
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        args: ["src", "tests"]
+      - id: bandit
+        name: Run bandit security checks
+        entry: uv run bandit
+        language: system
+        pass_filenames: false
+        args: ["-r", "--skip", "B101", "src", "tests"]
