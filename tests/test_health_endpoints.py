@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from model_serving_platform.api.app import create_app
 
 
-def test_healthz_reports_liveness() -> None:
+def test_healthz_reports_liveness(configured_bundle_environment: None) -> None:
     """Verify that the liveness endpoint reports a running process.
 
     This test confirms the service is reachable through the FastAPI app
@@ -20,34 +20,38 @@ def test_healthz_reports_liveness() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_readyz_reports_not_ready_during_stage_one() -> None:
-    """Verify that readiness is intentionally false in Stage 1.
+def test_readyz_reports_ready_after_bundle_validation(
+    configured_bundle_environment: None,
+) -> None:
+    """Verify that readiness is true after startup bundle validation succeeds.
 
-    This assertion protects the startup contract by ensuring traffic is
-    rejected until bundle loading and runtime wiring are implemented.
+    This assertion confirms Stage 2 startup marks the service ready only when
+    the GraphSAGE bundle contract has been successfully validated.
     Parameters: none.
     """
 
     test_client = TestClient(create_app())
     response = test_client.get("/readyz")
 
-    assert response.status_code == 503
-    assert response.json()["status"] == "not_ready"
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
 
 
-def test_readyz_reports_ready_when_runtime_state_is_ready() -> None:
-    """Verify that readiness returns success when startup state is ready.
+def test_readyz_reports_not_ready_when_runtime_state_changes(
+    configured_bundle_environment: None,
+) -> None:
+    """Verify that readiness returns not ready when state is changed manually.
 
-    This test exercises the positive readiness branch so the route contract
-    remains explicit when runtime initialisation marks the service as ready.
+    This test preserves endpoint branch coverage by exercising the temporary
+    not-ready state that can occur during controlled service shutdown.
     Parameters: none.
     """
 
     application = create_app()
-    application.state.runtime_state.is_ready = True
-    application.state.runtime_state.readiness_reason = "runtime initialisation complete"
+    application.state.runtime_state.is_ready = False
+    application.state.runtime_state.readiness_reason = "service shutdown in progress"
     test_client = TestClient(application)
     response = test_client.get("/readyz")
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "ready"
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"

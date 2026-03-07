@@ -17,7 +17,8 @@ def test_run_starts_uvicorn_with_service_settings() -> None:
         run()
 
     mock_uvicorn_run.assert_called_once_with(
-        "model_serving_platform.main:app",
+        "model_serving_platform.api.app:create_app",
+        factory=True,
         host="127.0.0.1",
         port=8000,
         reload=False,

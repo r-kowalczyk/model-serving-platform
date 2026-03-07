@@ -11,17 +11,23 @@ This repository is deliberately separate from model training code.
 
 Version 1 is GraphSAGE-only by design.
 
-## Stage 1 status
+## Stage 2 status
 
-Stage 1 bootstraps the service skeleton and startup wiring.
+Stage 2 adds GraphSAGE bundle contract validation and fail-fast startup checks.
 
-Included in this stage:
+Included in this stage now:
 
 - FastAPI application factory and entrypoint.
 - Environment-based settings using `pydantic-settings`.
 - `GET /healthz` liveness endpoint.
-- `GET /readyz` placeholder readiness endpoint that currently returns `503`.
+- `GET /readyz` readiness endpoint that is true only after bundle validation succeeds.
+- `GET /v1/metadata` endpoint exposing loaded bundle metadata and model backend details.
 - Package structure for API, application, domain, infrastructure, and config layers.
+- GraphSAGE bundle loader that validates:
+  - required files
+  - manifest schema keys
+  - `node_features.npy` input dimension against `manifest.model.input_dim`
+  - `edge_index.npy` first dimension equals `2`
 
 ## Current directory layout
 
@@ -47,13 +53,18 @@ uv venv
 source .venv/bin/activate
 uv sync --group dev
 cp .env.example .env
-uv run uvicorn model_serving_platform.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn model_serving_platform.api.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
 Then check:
 
 - `GET http://localhost:8000/healthz`
 - `GET http://localhost:8000/readyz`
+- `GET http://localhost:8000/v1/metadata`
+
+Important startup rule:
+
+- The service fails fast on startup if `MODEL_SERVING_BUNDLE_PATH` does not point to a valid GraphSAGE bundle directory.
 
 ## Quality checks
 
@@ -66,7 +77,7 @@ uv run mypy src tests
 ## Production-style scope statement
 
 This project demonstrates production-style serving engineering patterns.
-It is not presented as fully production-ready at Stage 1.
+It is not presented as fully production-ready at Stage 2.
 
 ## Licence
 

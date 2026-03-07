@@ -1,9 +1,6 @@
 """Application entry point for the model serving platform service."""
 
-from model_serving_platform.api.app import create_app
 from model_serving_platform.config.settings import ServiceSettings
-
-app = create_app()
 
 
 def run() -> None:
@@ -18,7 +15,8 @@ def run() -> None:
 
     service_settings = ServiceSettings()
     uvicorn.run(
-        "model_serving_platform.main:app",
+        "model_serving_platform.api.app:create_app",
+        factory=True,
         host=service_settings.host,
         port=service_settings.port,
         reload=service_settings.reload,

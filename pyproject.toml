@@ -6,13 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.116.1",
+    "numpy>=2.3.3",
     "pydantic>=2.11.9",
     "pydantic-settings>=2.11.0",
     "uvicorn>=0.35.0",
 ]
-
-[project.scripts]
-model-serving-platform = "model_serving_platform.main:run"
 
 [dependency-groups]
 dev = [

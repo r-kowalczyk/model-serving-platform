@@ -30,8 +30,8 @@ def get_readiness_status(request: Request) -> JSONResponse:
     """Return readiness state based on startup initialisation results.
 
     This endpoint is deliberately strict because traffic should only be routed
-    to instances that have completed startup dependencies. The route returns
-    HTTP 503 while Stage 1 placeholder initialisation remains incomplete.
+    to instances that have completed startup dependencies. Stage 2 marks the
+    service ready only after bundle validation and startup wiring succeed.
     Parameters: request provides access to shared runtime state.
     """
 
