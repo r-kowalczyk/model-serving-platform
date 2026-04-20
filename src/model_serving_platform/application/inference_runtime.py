@@ -1,4 +1,16 @@
-"""Runtime boundary between service logic and GraphSAGE infrastructure."""
+"""Shared runtime interface used by the rest of the application.
+
+This file does not run a model by itself. It defines the shape of the runtime
+that other parts of the service are allowed to call.
+In this project, "service code" means the code that handles API requests, checks
+input rules, and builds API responses. It is the coordinator layer.
+The model engine itself lives elsewhere and can be swapped or changed.
+The phrase "inference boundary" means the hand-off line between those two parts:
+service code calls runtime methods, and runtime code returns plain results.
+This boundary is useful because each side can change internally as long as the
+shared method signatures stay the same. A method signature is the exact method
+name, input fields, and output type. If that signature changes, callers break.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +20,15 @@ from typing import Protocol
 
 @dataclass(frozen=True, slots=True)
 class RuntimePredictionResult:
-    """Represent a single runtime score result used by service logic.
+    """One prediction result returned by a runtime method.
 
-    This structure keeps transport and runtime concerns separate because
-    route handlers should depend on plain application data types only.
-    Parameters: fields identify entities and the computed score value.
+    Think of this as one row in a results table:
+    source entity, target entity, predicted score, and context fields that
+    explain which strategy was used and whether enrichment was needed.
     """
 
+    # These fields are the minimum prediction output values that service code
+    # needs in order to build domain responses without runtime-specific types.
     source_entity_name: str
     target_entity_name: str
     score: float
@@ -24,13 +38,15 @@ class RuntimePredictionResult:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeInitialisationSummary:
-    """Describe runtime startup details used by readiness and metadata.
+    """Startup summary describing whether the runtime is ready to serve traffic.
 
-    The service stores this summary in app state so operators can verify
-    which runtime path initialised and whether base embeddings were prepared.
-    Parameters: each field is generated during runtime initialisation.
+    The application stores this object so health and metadata endpoints can
+    explain startup status in plain terms, for example "ready" or "not ready",
+    together with the reason and key model details.
     """
 
+    # These startup fields are surfaced through readiness and metadata routes so
+    # operators can verify what runtime path was initialised and why.
     runtime_name: str
     model_num_layers: int
     base_embedding_count: int
@@ -39,37 +55,39 @@ class RuntimeInitialisationSummary:
 
 
 class InferenceRuntime(Protocol):
-    """Define the minimum inference boundary required by service code.
+    """Runtime interface that service code depends on.
 
-    This protocol keeps route handlers independent from concrete GraphSAGE
-    classes and enables deterministic fake runtimes in service-level tests.
-    Parameters: implementations follow these method signatures exactly.
+    A `Protocol` is a Python typing feature that defines required attributes
+    and methods without providing implementation.
+    Any class that provides these members can be used as an `InferenceRuntime`.
+    This lets application code depend on behaviour, not on one concrete class.
+    In tests, you can provide a simple fake runtime with the same signatures.
     """
 
+    # Runtime implementations expose startup status as a data attribute so
+    # application code can read readiness and metadata without calling methods.
     initialisation_summary: RuntimeInitialisationSummary
 
     def has_entity_name(self, entity_name: str) -> bool:
-        """Return whether the runtime knows this entity name at startup.
+        """Check whether this entity is already known by the loaded runtime data.
 
-        Service orchestration uses this check to enforce request constraints
-        such as rejecting two unseen endpoints for Stage 4 behaviour.
-        Parameters: entity_name is checked against runtime entity mappings.
+        In simple terms, this asks: "Did this name exist in the model bundle
+        when the service started?"
+        The service layer uses this to decide whether a request is valid.
         """
 
     def get_known_entity_names(self) -> list[str]:
-        """Return known entity names available in the loaded bundle.
+        """Return all entity names that are currently known to the runtime.
 
-        Candidate-ranking endpoints use this value as the default pool of
-        entities that can be scored against a provided source entity.
-        Parameters: none.
+        The ranking endpoint uses this list as the default candidate pool when
+        it needs to score one source entity against many possible targets.
         """
 
     def supports_interaction_strategy(self) -> bool:
-        """Return whether interaction attachment path is currently available.
+        """Return whether the runtime can use the interaction attachment strategy.
 
-        Prediction orchestration uses this value to degrade unavailable
-        strategies explicitly instead of failing silently at request time.
-        Parameters: none.
+        The service layer checks this before running predictions so it can
+        reject unsupported requests clearly instead of failing later.
         """
 
     def score_entity_pair(
@@ -80,11 +98,11 @@ class InferenceRuntime(Protocol):
         source_entity_description: str | None = None,
         target_entity_description: str | None = None,
     ) -> RuntimePredictionResult:
-        """Score a single entity pair for potential link likelihood.
+        """Predict one link score between two entities.
 
-        Implementations may use precomputed embeddings or unseen-node flow
-        depending on endpoint membership and selected attachment strategy.
-        Parameters: entity names and strategy identify one prediction request.
+        Inputs identify the source and target entities, plus the requested
+        attachment strategy and optional text descriptions for unseen entities.
+        Output is one `RuntimePredictionResult`.
         """
 
     def score_entity_against_candidates(
@@ -95,9 +113,8 @@ class InferenceRuntime(Protocol):
         attachment_strategy: str,
         source_entity_description: str | None = None,
     ) -> list[RuntimePredictionResult]:
-        """Score one source entity against many candidate entity names.
+        """Predict scores from one source entity to many candidate entities.
 
-        This method supports top-k style link recommendation use cases while
-        keeping ranking logic within infrastructure-specific runtime code.
-        Parameters: names, top_k, and strategy define ranking behaviour.
+        The runtime returns multiple `RuntimePredictionResult` values, typically
+        sorted so the highest scoring candidates are first, up to `top_k`.
         """

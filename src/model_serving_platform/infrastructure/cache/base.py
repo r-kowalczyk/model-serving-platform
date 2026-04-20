@@ -1,4 +1,16 @@
-"""Cache abstractions used by infrastructure client integrations."""
+"""Shared cache types for code that calls external enrichment services.
+
+Enrichment clients (HTTP lookups, description resolution, and similar) can avoid
+repeated network calls by storing previous responses in a cache. This module does
+not implement disk or memory storage. It only defines:
+
+- `CacheEntry`: one cached record after read (payload plus when it expires).
+- `CacheStore`: the minimal `get` and `set` operations any backend must provide.
+
+Wrappers depend on `CacheStore` as a protocol, so the real storage can be a local
+JSON file directory (`local_file_cache.py`) or another implementation later
+without rewriting the enrichment client logic.
+"""
 
 from __future__ import annotations
 
@@ -8,37 +20,38 @@ from typing import Protocol
 
 @dataclass(frozen=True, slots=True)
 class CacheEntry:
-    """Represent one deserialised cache entry payload and expiry timestamp.
+    """One item returned from a cache read, ready for the caller to interpret.
 
-    Cache clients use this value to pass stored payloads through a typed
-    boundary before converting them into domain-specific result structures.
-    Parameters: payload and expires_at_unix_seconds describe one cache record.
+    `payload` is a plain dictionary (already parsed from storage). Callers map
+    it into their own result types. `expires_at_unix_seconds` is a Unix timestamp
+    after which the entry must be treated as invalid, even if still on disk.
     """
 
+    # Serializable blob as produced by the client that wrote the cache entry.
     payload: dict[str, object]
+    # Wall-clock expiry as seconds since the Unix epoch; compared at read time.
     expires_at_unix_seconds: float
 
 
 class CacheStore(Protocol):
-    """Define cache operations required by enrichment client wrappers.
+    """Contract for anything that can store and retrieve cache records by string key.
 
-    The protocol keeps cache backend details out of enrichment logic so file
-    and alternative backends can be swapped without changing client code.
-    Parameters: implementations follow these method signatures exactly.
+    A protocol in Python means: any class with matching `get` and `set` methods
+    satisfies this type. Enrichment code depends on behaviour, not on one concrete
+    class name.
     """
 
     def get(self, cache_key: str) -> CacheEntry | None:
-        """Return cache entry for key when present and not expired.
+        """Load one entry for `cache_key`, or return None if missing or expired.
 
-        Implementations should return None when key is absent or record has
-        expired according to configured cache retention policy.
-        Parameters: cache_key is deterministic key from client logic.
+        The key must be stable: the same logical request must always produce the
+        same key string so a later `set` and `get` pair match.
         """
 
     def set(self, cache_key: str, payload: dict[str, object]) -> None:
-        """Persist one cache payload with backend-specific expiry metadata.
+        """Write `payload` under `cache_key` and store when this entry expires.
 
-        Implementations apply configured TTL and serialise payload safely for
-        subsequent deterministic lookup by identical cache keys.
-        Parameters: cache_key identifies record and payload stores value.
+        Each backend has a configured lifetime for entries (time to live). After
+        that duration, `get` must treat the record as absent. Callers only pass
+        a key and a dictionary; persistence format is implementation-specific.
         """

@@ -1,4 +1,25 @@
-"""External enrichment client abstractions and HTTP implementation."""
+"""Clients that fetch extra entity data from outside this service process.
+
+"In enrichment" here means: look up text descriptions or lists of interaction
+partners for an entity name, using HTTP services configured at startup (or report
+that those services are not configured). The GraphSAGE runtime calls these
+clients when it needs information that is not already in the loaded bundle.
+
+This file defines:
+
+- Result dataclasses (`EntityDescriptionLookupResult`, `InteractionPartnerLookupResult`)
+  so every lookup returns both data and an explicit outcome (`success`,
+  `not_found`, `failed`, `unavailable`).
+- `ExternalEnrichmentClient`, a protocol listing the two lookup methods plus
+  `supports_interaction_strategy`, so callers depend on behaviour, not one class.
+- `HttpExternalEnrichmentClient`, which performs real GET requests with timeout
+  and linear backoff retries, and records metrics when enabled.
+- `NoopExternalEnrichmentClient`, which never calls the network and always
+  reports `unavailable`, for tests or runs without external URLs.
+- `CachingExternalEnrichmentClient`, which wraps another client and stores
+  lookup results in a `CacheStore` (for example local JSON files) to avoid
+  repeat HTTP calls for the same entity name.
+"""
 
 from __future__ import annotations
 
@@ -20,11 +41,11 @@ external_enrichment_client_logger = logging.getLogger(
 
 @dataclass(frozen=True, slots=True)
 class EntityDescriptionLookupResult:
-    """Represent the result of external description lookup for one entity.
+    """Outcome of asking an external system for one entity's text description.
 
-    The service uses this result to decide whether unseen entity handling can
-    proceed with external data or should take explicit degraded paths.
-    Parameters: description and outcome describe lookup result state.
+    `description` is the text when found; it is None when not found or when
+    the call did not succeed. `outcome` tells the runtime which case occurred
+    so it can branch without guessing from None alone.
     """
 
     description: str | None
@@ -33,11 +54,11 @@ class EntityDescriptionLookupResult:
 
 @dataclass(frozen=True, slots=True)
 class InteractionPartnerLookupResult:
-    """Represent the result of external interaction partner name lookup.
+    """Outcome of asking an external system for entities linked by interactions.
 
-    Interaction lookups are optional in v1 and may fail, so this structure
-    makes success and degraded outcomes explicit for runtime decisions.
-    Parameters: partner names and outcome describe lookup result state.
+    `partner_entity_names` is the list returned when the call succeeds; it is
+    empty for not found, failure, or when interaction lookup is not configured.
+    `outcome` records which situation applies for the runtime.
     """
 
     partner_entity_names: list[str]
@@ -45,48 +66,32 @@ class InteractionPartnerLookupResult:
 
 
 class ExternalEnrichmentClient(Protocol):
-    """Define client operations used by GraphSAGE unseen entity handling.
+    """Minimum surface the inference runtime needs for external lookups.
 
-    Runtime code depends on this protocol to avoid route-level HTTP logic and
-    to keep enrichment concerns testable and replaceable by deterministic fakes.
-    Parameters: implementations follow these method signatures exactly.
+    Any class that implements these three members can be passed in. That allows
+    HTTP, no-op, caching wrapper, or test doubles without changing runtime code.
     """
 
     def lookup_entity_description(
         self, entity_name: str
     ) -> EntityDescriptionLookupResult:
-        """Fetch one entity description from external enrichment provider.
-
-        Implementations may return unavailable or failed outcomes when network
-        access is disabled or downstream requests do not complete successfully.
-        Parameters: entity_name identifies the unresolved endpoint entity.
-        """
+        """Return description plus outcome for one `entity_name` string."""
 
     def lookup_interaction_partners(
         self, entity_name: str
     ) -> InteractionPartnerLookupResult:
-        """Fetch candidate interaction partner names for one source entity.
-
-        Implementations should return partner names when available, otherwise
-        return explicit degraded outcomes instead of raising route-level errors.
-        Parameters: entity_name identifies source entity for interaction lookup.
-        """
+        """Return partner names plus outcome for one source `entity_name`."""
 
     def supports_interaction_strategy(self) -> bool:
-        """Return whether interaction enrichment path is currently available.
-
-        Service orchestration uses this check to enforce explicit strategy
-        degradation when interaction lookups are unavailable by configuration.
-        Parameters: none.
-        """
+        """True when this client can meaningfully support interaction attachment."""
 
 
 class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
-    """HTTP enrichment client with timeout, retries, and bounded backoff.
+    """Calls configured HTTP endpoints for description and interaction lookups.
 
-    The implementation keeps external dependency handling inside infrastructure
-    code so route and application layers stay focused on serving behaviour.
-    Parameters: endpoint URLs and timeout/retry values are startup settings.
+    URLs may be None: then lookups return `unavailable` without sending requests.
+    Retries use `sleep` with increasing delay; final failure returns payload None
+    and callers map that to `failed` outcomes. Optional `transport` is for tests.
     """
 
     def __init__(
@@ -99,12 +104,7 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         transport: httpx.BaseTransport | None = None,
         service_metrics: ServiceMetrics | None = None,
     ) -> None:
-        """Initialise HTTP client configuration for enrichment operations.
-
-        Optional transport injection exists for deterministic tests that avoid
-        live network calls while covering timeout and retry control flow.
-        Parameters: values are passed from service settings or test fixtures.
-        """
+        """Store URLs, timing, retry policy, HTTP client, and optional metrics."""
 
         self._description_lookup_url = description_lookup_url
         self._interaction_lookup_url = interaction_lookup_url
@@ -117,13 +117,9 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
     def lookup_entity_description(
         self, entity_name: str
     ) -> EntityDescriptionLookupResult:
-        """Lookup one entity description using configured HTTP endpoint.
+        """GET description endpoint with `entity_name` query param, or unavailable."""
 
-        This method returns explicit outcomes so runtime code can apply clear
-        fallback behaviour without exposing raw transport-layer exceptions.
-        Parameters: entity_name is sent as query parameter to lookup endpoint.
-        """
-
+        # No URL in settings: treat as disabled, not as a network failure.
         if self._description_lookup_url is None:
             self._record_external_lookup(
                 operation="entity_description_lookup",
@@ -169,12 +165,7 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
     def lookup_interaction_partners(
         self, entity_name: str
     ) -> InteractionPartnerLookupResult:
-        """Lookup external interaction partner names for one source entity.
-
-        The runtime uses this optional signal for interaction attachment mode
-        and falls back explicitly when partner data is unavailable.
-        Parameters: entity_name is sent as query parameter to lookup endpoint.
-        """
+        """GET interaction endpoint with `entity_name` query param, or unavailable."""
 
         if self._interaction_lookup_url is None:
             self._record_external_lookup(
@@ -233,22 +224,12 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         )
 
     def supports_interaction_strategy(self) -> bool:
-        """Return whether interaction lookup endpoint URL is configured.
-
-        This simple check is used by service logic to degrade unsupported
-        interaction attachment requests toward cosine strategy explicitly.
-        Parameters: none.
-        """
+        """True when an interaction lookup base URL is set (HTTP client may still fail per call)."""
 
         return self._interaction_lookup_url is not None
 
     def _record_external_lookup(self, operation: str, outcome: str) -> None:
-        """Record one external lookup metric when metrics collection is active.
-
-        This helper avoids duplicating conditional metrics checks in each
-        lookup branch while keeping operation and outcome labelling explicit.
-        Parameters: operation and outcome identify one lookup event.
-        """
+        """Emit one external lookup counter when `service_metrics` is not None."""
 
         if self._service_metrics is None:
             return
@@ -263,13 +244,9 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
         query_params: dict[str, str],
         operation_name: str,
     ) -> dict[str, object] | None:
-        """Execute one HTTP GET with timeout and bounded retry behaviour.
+        """GET JSON body or None after all attempts exhausted."""
 
-        This method retries transient transport failures and HTTP status errors
-        with deterministic linear backoff then returns None on final failure.
-        Parameters: request_url and query_params define one external request.
-        """
-
+        # First attempt plus `retry_count` extra tries; backoff grows with attempt.
         total_attempt_count = self._retry_count + 1
         for attempt_index in range(total_attempt_count):
             try:
@@ -306,22 +283,12 @@ class HttpExternalEnrichmentClient(ExternalEnrichmentClient):
 
 
 class NoopExternalEnrichmentClient(ExternalEnrichmentClient):
-    """External enrichment client that always reports unavailable outcomes.
-
-    This implementation is useful for tests and local runs where no external
-    enrichment dependency is configured but explicit degraded handling is needed.
-    Parameters: none.
-    """
+    """Stub client: no HTTP; every lookup returns `unavailable` and empty lists."""
 
     def lookup_entity_description(
         self, entity_name: str
     ) -> EntityDescriptionLookupResult:
-        """Return unavailable outcome for description lookups.
-
-        This method intentionally avoids network calls and communicates that
-        external enrichment description lookup is not configured for this run.
-        Parameters: entity_name is accepted for protocol compatibility.
-        """
+        """Ignore `entity_name`; always return no description and unavailable."""
 
         _ = entity_name
         return EntityDescriptionLookupResult(description=None, outcome="unavailable")
@@ -329,12 +296,7 @@ class NoopExternalEnrichmentClient(ExternalEnrichmentClient):
     def lookup_interaction_partners(
         self, entity_name: str
     ) -> InteractionPartnerLookupResult:
-        """Return unavailable outcome for interaction partner lookups.
-
-        This method intentionally avoids network calls and communicates that
-        interaction enrichment is not configured for this runtime environment.
-        Parameters: entity_name is accepted for protocol compatibility.
-        """
+        """Ignore `entity_name`; always return no partners and unavailable."""
 
         _ = entity_name
         return InteractionPartnerLookupResult(
@@ -343,22 +305,16 @@ class NoopExternalEnrichmentClient(ExternalEnrichmentClient):
         )
 
     def supports_interaction_strategy(self) -> bool:
-        """Return false because interaction endpoint is not configured.
-
-        Service-level strategy resolution reads this capability to downgrade
-        unsupported interaction requests to cosine strategy explicitly.
-        Parameters: none.
-        """
+        """Always false: this stub never enables interaction attachment."""
 
         return False
 
 
 class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
-    """Cache wrapper for enrichment client lookups with deterministic keys.
+    """Delegates to an inner client on cache miss; stores JSON-serialisable dicts on hit write.
 
-    The wrapper keeps caching concerns outside HTTP transport code and enables
-    repeated enrichment calls to avoid unnecessary external dependency latency.
-    Parameters: wrapped client and cache store are injected at startup.
+    Keys are built from normalised entity name plus operation prefix so description
+    and interaction caches never collide. Inner client answers `supports_interaction_strategy`.
     """
 
     def __init__(
@@ -367,12 +323,7 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
         cache_store: CacheStore,
         service_metrics: ServiceMetrics | None = None,
     ) -> None:
-        """Initialise cache wrapper around one enrichment client instance.
-
-        Composition is used so the same cache behaviour can wrap different
-        client implementations without modifying underlying lookup code.
-        Parameters: wrapped client executes misses and cache stores results.
-        """
+        """Remember inner client, disk or other cache backend, and optional metrics."""
 
         self._wrapped_external_enrichment_client = wrapped_external_enrichment_client
         self._cache_store = cache_store
@@ -381,12 +332,7 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
     def lookup_entity_description(
         self, entity_name: str
     ) -> EntityDescriptionLookupResult:
-        """Lookup entity description with cache hit, miss, and write behaviour.
-
-        Cache entries are keyed deterministically from entity name so repeated
-        unseen requests are consistent and avoid repeated external calls.
-        Parameters: entity_name identifies one description lookup request.
-        """
+        """Try cache; on valid hit return stored result; else call inner client then `set`."""
 
         cache_key = _build_description_cache_key(entity_name=entity_name)
         cached_entry = self._cache_store.get(cache_key=cache_key)
@@ -444,12 +390,7 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
     def lookup_interaction_partners(
         self, entity_name: str
     ) -> InteractionPartnerLookupResult:
-        """Lookup interaction partners with deterministic cache read and write.
-
-        Partner lookup caching reduces repeated external calls for frequent
-        entities and keeps fallback outcomes stable across repeated requests.
-        Parameters: entity_name identifies one interaction lookup request.
-        """
+        """Same pattern as description lookup: cache read, inner client on miss, then write."""
 
         cache_key = _build_interaction_cache_key(entity_name=entity_name)
         cached_entry = self._cache_store.get(cache_key=cache_key)
@@ -512,22 +453,12 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
         return lookup_result
 
     def supports_interaction_strategy(self) -> bool:
-        """Return wrapped client interaction capability without modification.
-
-        Capability reporting is delegated to wrapped client because caching
-        does not affect whether interaction endpoint dependencies are present.
-        Parameters: none.
-        """
+        """Pass through to wrapped client; cache layer does not change capability."""
 
         return self._wrapped_external_enrichment_client.supports_interaction_strategy()
 
     def _record_cache_event(self, cache_name: str, outcome: str) -> None:
-        """Record cache event metric when metrics collection is enabled.
-
-        This helper centralises optional metrics checks while preserving cache
-        event semantics for hit, miss, and write instrumentation labels.
-        Parameters: cache_name and outcome define one cache metric event.
-        """
+        """Emit hit, miss, or write counter when `service_metrics` is not None."""
 
         if self._service_metrics is None:
             return
@@ -538,24 +469,14 @@ class CachingExternalEnrichmentClient(ExternalEnrichmentClient):
 
 
 def _build_description_cache_key(entity_name: str) -> str:
-    """Build deterministic cache key for one entity description lookup.
-
-    Keys include operation namespace and normalised entity text to ensure
-    cache records are stable across repeated requests with same logical input.
-    Parameters: entity_name is source value for key derivation.
-    """
+    """Stable string key: prefix `description:` plus hash of lowercased trimmed name."""
 
     normalised_entity_name = entity_name.strip().lower()
     return "description:" + sha256(normalised_entity_name.encode("utf-8")).hexdigest()
 
 
 def _build_interaction_cache_key(entity_name: str) -> str:
-    """Build deterministic cache key for one interaction partner lookup.
-
-    Keys include operation namespace and normalised entity text to separate
-    interaction results cleanly from description lookup cache records.
-    Parameters: entity_name is source value for key derivation.
-    """
+    """Same as description key but prefix `interaction:` so namespaces do not overlap."""
 
     normalised_entity_name = entity_name.strip().lower()
     return "interaction:" + sha256(normalised_entity_name.encode("utf-8")).hexdigest()

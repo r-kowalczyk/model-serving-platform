@@ -1,4 +1,24 @@
-"""GraphSAGE bundle loader and startup contract validator."""
+"""Load and check a GraphSAGE model bundle folder before the API serves traffic.
+
+A "bundle" is a directory on disk that holds everything needed to run inference:
+weights, graph tensors, and a manifest that describes model shape and settings.
+This module is run once at application startup. It does not score requests.
+
+`GraphSageBundleLoader.load_and_validate_bundle` walks through a fixed checklist:
+
+- whether the folder exists and is readable,
+- whether required files are present,
+- whether optional cache JSON files exist (creating empty ones if missing),
+- whether `manifest.json` parses and matches the expected schema,
+- whether `node_features.npy` and `edge_index.npy` have ranks and dimensions that agree
+with the manifest.
+
+Any failure raises `GraphSageBundleValidationError` with an `error_code` and `details`
+so startup stops immediately instead of failing on the first prediction.
+
+On success it returns `LoadedGraphSageBundleMetadata`, a read-only snapshot of paths
+and counts that the app stores for metadata endpoints and for wiring the inference runtime.
+"""
 
 from __future__ import annotations
 
@@ -18,12 +38,14 @@ from model_serving_platform.infrastructure.bundles.manifest import (
     GraphSageBundleManifest,
 )
 
+# Files that must exist in the bundle root; without these, serving cannot start.
 REQUIRED_BUNDLE_FILE_NAMES = (
     "model_state.pt",
     "manifest.json",
     "node_features.npy",
     "edge_index.npy",
 )
+# Optional JSON caches; if missing, the loader creates empty `{}` files.
 OPTIONAL_CACHE_FILE_NAMES = ("resolver_cache.json", "interaction_cache.json")
 
 bundle_loader_logger = logging.getLogger(
@@ -33,12 +55,12 @@ bundle_loader_logger = logging.getLogger(
 
 @dataclass(frozen=True, slots=True)
 class LoadedGraphSageBundleMetadata:
-    """Represent validated bundle metadata stored in application state.
+    """Validated bundle facts kept on the app after startup checks pass.
 
-    This value object is the service-facing result of startup validation.
-    It keeps route code simple by exposing only data that is safe to return
-    through metadata endpoints and operational logging.
-    Parameters: all fields originate from validated bundle files.
+    This is not a live loader; it is a frozen record of paths, tensor sizes,
+    and manifest fields. Routes such as `/v1/metadata` read this object so
+    operators can see which bundle version and paths the process is using.
+    Every field is filled from files that were already checked on disk.
     """
 
     bundle_path: str
@@ -59,22 +81,22 @@ class LoadedGraphSageBundleMetadata:
 
 
 class GraphSageBundleLoader:
-    """Load and validate a GraphSAGE serving bundle from a directory path.
+    """Runs filesystem and schema checks for one bundle directory.
 
-    The loader performs contract checks before the API marks readiness true.
-    This protects serving reliability by rejecting malformed bundle inputs
-    before any request handling can begin.
-    Parameters: none.
+    The application constructs this class with no arguments; the only public
+    entry point is `load_and_validate_bundle`. Callers pass the configured bundle
+    path from settings. All validation is synchronous and runs during startup.
     """
 
     def load_and_validate_bundle(
         self, bundle_directory_path: Path
     ) -> LoadedGraphSageBundleMetadata:
-        """Load bundle files and enforce the Stage 2 startup contract.
+        """Validate the bundle directory and return metadata for app state.
 
-        Validation checks required files, manifest schema and tensor shapes.
-        A failure raises a structured exception so startup stops immediately.
-        Parameters: bundle_directory_path points to an extracted bundle.
+        Steps run in order: resolve path, log diagnostics, check directory access,
+        require core files, ensure optional cache files, load and validate manifest,
+        load NumPy arrays, then compare array shapes to manifest model fields.
+        Raises `GraphSageBundleValidationError` on any failed step.
         """
 
         resolved_bundle_directory_path = bundle_directory_path.resolve()
@@ -102,6 +124,7 @@ class GraphSageBundleLoader:
                 ],
             },
         )
+        # Fail early on wrong path, permissions, or volume mounts before file checks.
         self._validate_bundle_directory_access(
             bundle_directory_path=resolved_bundle_directory_path,
             bundle_directory_diagnostics=bundle_directory_diagnostics,
@@ -110,6 +133,7 @@ class GraphSageBundleLoader:
             bundle_directory_path=bundle_directory_path,
             bundle_directory_diagnostics=bundle_directory_diagnostics,
         )
+        # Empty cache files are allowed; create them so downstream code can open them.
         self._initialise_optional_cache_files(
             bundle_directory_path=resolved_bundle_directory_path
         )
@@ -119,11 +143,13 @@ class GraphSageBundleLoader:
         node_features_array, edge_index_array = self._load_graph_arrays(
             bundle_directory_path=bundle_directory_path
         )
+        # Catch shape mismatches before the GraphSAGE runtime is constructed.
         self._validate_graph_shapes(
             node_features_array=node_features_array,
             edge_index_array=edge_index_array,
             parsed_manifest=parsed_manifest,
         )
+        # Bundle contents are not reloaded here; this object is the startup summary.
         return LoadedGraphSageBundleMetadata(
             bundle_path=str(bundle_directory_path.resolve()),
             manifest_path=str((bundle_directory_path / "manifest.json").resolve()),

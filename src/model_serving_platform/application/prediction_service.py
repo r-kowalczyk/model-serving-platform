@@ -1,4 +1,13 @@
-"""Application service for prediction endpoint orchestration."""
+"""Prediction coordinator used by API routes.
+
+This file contains the `PredictionService` class, which is the layer between
+HTTP route handlers and the lower-level inference runtime.
+Route handlers pass validated request objects into this service.
+The service applies API business rules, calls runtime scoring methods, records
+metrics and logs, and returns response objects expected by the API layer.
+In plain terms, this is the place where request policy is enforced, while
+model scoring remains in runtime code.
+"""
 
 from __future__ import annotations
 
@@ -24,38 +33,55 @@ prediction_service_logger = logging.getLogger(
 
 
 class TwoUnseenEndpointsError(ValueError):
-    """Raise when both endpoints are unseen in a pair prediction request.
+    """Error for pair requests where both entities are unknown.
 
-    Stage 4 keeps this as an explicit contract because v1 allows at most one
-    unseen endpoint for pairwise predictions and must reject two unseen nodes.
-    Parameters: this exception uses a fixed human-readable message.
+    In v1 behaviour, a pair request may include at most one unseen entity.
+    If both are unseen, the service rejects the request deterministically.
     """
 
 
 class TopKLimitExceededError(ValueError):
-    """Raise when requested top-k exceeds configured API upper bound.
+    """Error for ranking requests that ask for too many results.
 
-    The service enforces this to prevent oversized ranking requests from
-    creating unpredictable latency and excessive response payload size.
-    Parameters: this exception uses a fixed human-readable message.
+    The service has a configured `max_top_k` limit.
+    If a request exceeds that limit, the service rejects it.
+    This keeps response sizes and runtime cost within expected bounds.
     """
 
 
 class MissingDescriptionForRestrictedNetworkError(ValueError):
-    """Raise when unseen entities omit descriptions in restricted mode.
+    """Error for missing descriptions in restricted network mode.
 
-    Restricted-network mode disables external enrichment assumptions, so
-    unseen entities must include caller-provided descriptions by contract.
-    Parameters: this exception uses a fixed human-readable message.
+    In restricted mode, the service cannot assume it can fetch missing text
+    descriptions from external systems.
+    For unseen entities, the caller must provide descriptions directly.
     """
 
 
 class PredictionService:
-    """Coordinate request-level prediction behaviour outside route handlers.
+    """Run request-level prediction policy and runtime calls.
 
-    Route handlers delegate to this service so business rules and runtime
-    interactions stay testable and do not leak into transport-layer code.
-    Parameters: runtime and startup metadata are provided at app creation.
+    This class is intentionally separate from route handlers.
+    Routes should focus on HTTP transport concerns, while this class focuses on
+    prediction rules and response composition.
+    The class receives long-lived dependencies at startup, then reuses them for
+    every request.
+
+    Examples of HTTP transport concerns (kept in routes):
+    - Read HTTP body JSON into typed request models.
+    - Convert service exceptions into HTTP status codes such as 422.
+    - Read request-scoped values from middleware state.
+
+    Examples of prediction rules (kept in this class):
+    - Reject pair requests where both endpoints are unseen.
+    - Enforce configured `max_top_k` limits for ranking requests.
+    - Require caller descriptions for unseen entities in restricted mode.
+    - Apply explicit strategy fallback when interaction strategy is unavailable.
+
+    Examples of response composition (kept in this class):
+    - Build `PredictLinkResponse` and `PredictLinksResponse` objects.
+    - Copy metadata fields such as model version and bundle version.
+    - Attach latency and request identifier values to each response.
     """
 
     def __init__(
@@ -68,11 +94,15 @@ class PredictionService:
         restricted_network_mode: bool = False,
         service_metrics: ServiceMetrics | None = None,
     ) -> None:
-        """Initialise the prediction orchestration service.
+        """Store startup dependencies and configuration for later requests.
 
-        Startup wiring passes configuration and metadata once so each request
-        can reuse stable values without recomputing service-level settings.
-        Parameters: fields are persisted for request orchestration methods.
+        Parameters:
+        - `inference_runtime`: object that performs actual scoring operations.
+        - `service_version` and `bundle_version`: returned in API responses.
+        - `max_top_k`: upper bound for ranking request size.
+        - `default_attachment_strategy`: strategy used when client omits one.
+        - `restricted_network_mode`: enables stricter input requirements.
+        - `service_metrics`: optional metrics collector for counters.
         """
 
         self._inference_runtime = inference_runtime
@@ -86,11 +116,17 @@ class PredictionService:
     def predict_link(
         self, predict_link_request: PredictLinkRequest
     ) -> PredictLinkResponse:
-        """Predict a link score for one entity pair using runtime boundary.
+        """Handle one pairwise prediction request from start to finish.
 
-        This method applies request rules, resolves attachment strategy, and
-        returns a typed response with latency and request correlation fields.
-        Parameters: predict_link_request contains one pair prediction request.
+        Steps performed by this method:
+        1. Start a latency timer.
+        2. Check whether each requested entity is known to the runtime.
+           Here "runtime" means the in-memory inference engine loaded at startup.
+        3. Apply request rules such as "both entities cannot be unseen".
+        4. In restricted mode, require descriptions for unseen entities.
+        5. Resolve the attachment strategy, including controlled fallback.
+        6. Call runtime scoring for one entity pair.
+        7. Build and return the API response payload.
         """
 
         request_start_time = perf_counter()
@@ -100,10 +136,14 @@ class PredictionService:
         target_entity_is_known = self._inference_runtime.has_entity_name(
             predict_link_request.entity_b_name
         )
+        # v1 policy rejects pair requests when both entities are unseen because
+        # this path is intentionally constrained to at most one unseen endpoint.
         if not source_entity_is_known and not target_entity_is_known:
             raise TwoUnseenEndpointsError(
                 "Pair predictions do not support two unseen endpoints in v1."
             )
+        # Restricted mode assumes no external enrichment source is available, so
+        # caller-provided descriptions are required for unseen entities.
         if self._restricted_network_mode:
             if (
                 not source_entity_is_known
@@ -126,6 +166,8 @@ class PredictionService:
         ) = self._resolve_attachment_strategy(
             requested_attachment_strategy=predict_link_request.attachment_strategy
         )
+        # Runtime call performs actual scoring. Service layer keeps policy and
+        # response shaping, while runtime layer keeps model-specific computation.
         runtime_prediction_result = self._inference_runtime.score_entity_pair(
             source_entity_name=predict_link_request.entity_a_name,
             target_entity_name=predict_link_request.entity_b_name,
@@ -174,11 +216,16 @@ class PredictionService:
     def predict_links(
         self, predict_links_request: PredictLinksRequest
     ) -> PredictLinksResponse:
-        """Predict ranked link scores for one source against known candidates.
+        """Handle one ranking prediction request from start to finish.
 
-        This method enforces top-k constraints and delegates ranking to the
-        runtime so endpoint logic remains thin and configuration-aware.
-        Parameters: predict_links_request contains one ranking request.
+        Steps performed by this method:
+        1. Start a latency timer.
+        2. Enforce `top_k` upper bound to control request size.
+        3. Apply restricted-mode description requirement for unseen source.
+        4. Resolve the attachment strategy, including controlled fallback.
+        5. Build candidate list from known entities, excluding source itself.
+        6. Call runtime scoring against candidate entities.
+        7. Build and return ranked API response payload.
         """
 
         request_start_time = perf_counter()
@@ -205,6 +252,8 @@ class PredictionService:
             requested_attachment_strategy=predict_links_request.attachment_strategy
         )
         known_entity_names = self._inference_runtime.get_known_entity_names()
+        # Remove the source entity from candidate list so self-links are not
+        # returned as recommendations unless a future API version allows them.
         candidate_entity_names = [
             candidate_entity_name
             for candidate_entity_name in known_entity_names
@@ -274,11 +323,13 @@ class PredictionService:
     def _resolve_attachment_strategy(
         self, requested_attachment_strategy: AttachmentStrategy | None
     ) -> tuple[AttachmentStrategy, bool]:
-        """Resolve request attachment strategy with configuration defaults.
+        """Choose which attachment strategy the runtime should use.
 
-        This helper keeps defaulting behaviour consistent across endpoints and
-        centralises strategy resolution in one explicit service function.
-        Parameters: requested_attachment_strategy may be omitted by clients.
+        Behaviour:
+        - If the client provided a strategy, use it.
+        - Otherwise, use the configured default strategy.
+        - If strategy is `interaction` but runtime does not support it, switch
+          to `cosine`, emit fallback metrics/logs, and return `True` fallback flag.
         """
 
         if requested_attachment_strategy is not None:
@@ -289,6 +340,8 @@ class PredictionService:
             resolved_attachment_strategy == "interaction"
             and not self._inference_runtime.supports_interaction_strategy()
         ):
+            # Fallback is explicit and observable so operators can track when
+            # requested strategy and runtime capability do not match.
             if self._service_metrics is not None:
                 self._service_metrics.increment_fallback_usage(
                     reason="interaction_strategy_unavailable"
@@ -307,11 +360,10 @@ class PredictionService:
     def _normalise_attachment_strategy(
         self, attachment_strategy: str
     ) -> AttachmentStrategy:
-        """Validate runtime attachment strategy values for typed responses.
+        """Map runtime strategy text to API response literal values.
 
-        Response models expose a strict literal strategy value, so this helper
-        enforces that runtime values remain within the public API contract.
-        Parameters: attachment_strategy is provided by runtime results.
+        The public response model allows only `interaction` or `cosine`.
+        This method enforces that contract before response construction.
         """
 
         if attachment_strategy in ("interaction", "cosine"):

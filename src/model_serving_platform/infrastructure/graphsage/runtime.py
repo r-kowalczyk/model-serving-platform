@@ -1,4 +1,25 @@
-"""Concrete GraphSAGE runtime boundary used by the service layer."""
+"""GraphSAGE implementation of the inference runtime used at prediction time.
+
+`PredictionService` talks only to the `InferenceRuntime` protocol. This file
+provides `GraphSageInferenceRuntime`, the real implementation for this project.
+
+Startup factory `from_loaded_bundle_metadata` reads `manifest.json` again from
+disk, loads `node_features.npy`, builds a small typed spec from manifest model
+fields, and precomputes one embedding vector per graph node. That precompute step
+uses a fixed random projection (seeded from the bundle) so tests stay stable; it
+is not the full trained GraphSAGE forward pass, but it gives consistent vectors
+for cosine scoring.
+
+At request time the runtime resolves each entity name to a vector: known names
+use the precomputed row; unseen names use caller text, external description
+lookup, or a degraded hash of the name, depending on mode and inputs. Pair and
+ranking methods then use cosine similarity between vectors. Interaction strategy
+can narrow ranking candidates using external partner lists when the source is
+unseen.
+
+Module-level helpers at the bottom of the file implement projection, cosine,
+unseen text embeddings, candidate filtering, and enrichment status labelling.
+"""
 
 from __future__ import annotations
 
@@ -32,11 +53,9 @@ graph_sage_runtime_logger = logging.getLogger(
 
 @dataclass(frozen=True, slots=True)
 class GraphSageModelReconstructionSpec:
-    """Describe model architecture values used during runtime reconstruction.
+    """Copy of manifest architecture numbers kept on the runtime instance.
 
-    This specification keeps architecture parsing explicit so startup can
-    guarantee `num_layers` comes from manifest data and not code defaults.
-    Parameters: every field is copied from validated manifest architecture.
+    Used for output dimension when building unseen embeddings and for metadata.
     """
 
     input_dimension: int
@@ -49,11 +68,9 @@ class GraphSageModelReconstructionSpec:
 
 
 class GraphSageInferenceRuntime(InferenceRuntime):
-    """Provide the GraphSAGE-specific runtime used by service orchestration.
+    """Loads bundle data once, then answers `InferenceRuntime` scoring calls.
 
-    This runtime keeps GraphSAGE implementation details outside route logic.
-    Stage 3 focuses on reconstruction boundary and startup embedding preload.
-    Parameters: use `from_loaded_bundle_metadata` for deterministic startup.
+    Prefer constructing via `from_loaded_bundle_metadata` in production.
     """
 
     def __init__(
@@ -65,12 +82,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         external_enrichment_client: ExternalEnrichmentClient,
         restricted_network_mode: bool,
     ) -> None:
-        """Initialise runtime with reconstructed model spec and embeddings.
-
-        The service depends on this object for scoring operations, so startup
-        precomputes embeddings once and stores them for repeated reuse.
-        Parameters: values are produced by bundle-based startup initialisation.
-        """
+        """Store maps, embedding matrix, enrichment client, mode, and readiness summary."""
 
         self._model_reconstruction_spec = model_reconstruction_spec
         self._node_name_to_node_id = node_name_to_node_id
@@ -87,22 +99,12 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         )
 
     def has_entity_name(self, entity_name: str) -> bool:
-        """Return whether this entity name exists in bundle node mappings.
-
-        Service-level request rules use this check to decide whether requests
-        are existing-existing, one-unseen, or two-unseen endpoint scenarios.
-        Parameters: entity_name is matched against bundle display name mapping.
-        """
+        """True if `entity_name` is a key in the bundle `node_name_to_id` map."""
 
         return entity_name in self._node_name_to_node_id
 
     def get_known_entity_names(self) -> list[str]:
-        """Return deterministic sorted known entity names from the bundle.
-
-        Candidate ranking endpoints use this list as the known target pool and
-        sorting keeps deterministic behaviour for stable API-level tests.
-        Parameters: none.
-        """
+        """All bundle entity display names, sorted for stable ordering."""
 
         return sorted(self._node_name_to_node_id.keys())
 
@@ -113,12 +115,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         external_enrichment_client: ExternalEnrichmentClient | None = None,
         restricted_network_mode: bool = False,
     ) -> "GraphSageInferenceRuntime":
-        """Construct runtime from bundle metadata and on-disk bundle artefacts.
-
-        A classmethod keeps startup wiring concise while preserving a clear
-        boundary where GraphSAGE reconstruction and preload behaviour live.
-        Parameters: loaded_bundle_metadata references validated bundle files.
-        """
+        """Read manifest and node features from paths in metadata, precompute embeddings, return instance."""
 
         runtime_initialisation_start_timestamp = perf_counter()
         graph_sage_runtime_logger.info(
@@ -130,6 +127,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             },
         )
         manifest_loading_start_timestamp = perf_counter()
+        # Full manifest JSON is read again here so node id maps are available alongside arrays.
         manifest_payload = json.loads(
             Path(loaded_bundle_metadata.manifest_path).read_text(encoding="utf-8")
         )
@@ -144,6 +142,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             },
         )
         node_feature_loading_start_timestamp = perf_counter()
+        # Feature matrix shape was validated at bundle load; this load feeds precompute only.
         node_features_array = np.load(loaded_bundle_metadata.node_features_path)
         node_feature_loading_elapsed_milliseconds = int(
             (perf_counter() - node_feature_loading_start_timestamp) * 1000
@@ -160,7 +159,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             model_architecture=loaded_bundle_metadata.model_architecture
         )
 
-        # A deterministic projection is used here to keep Stage 3 runtime simple while proving preload wiring.
+        # Linear projection with a seeded RNG: fixed vectors per node for cosine scoring in this codebase.
         embedding_precomputation_start_timestamp = perf_counter()
         precomputed_node_embeddings = _precompute_base_node_embeddings(
             node_features_array=node_features_array,
@@ -189,6 +188,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             },
         )
 
+        # Use noop enrichment when caller passes None so the runtime always has a concrete client.
         return cls(
             model_reconstruction_spec=model_reconstruction_spec,
             node_name_to_node_id=dict(manifest_payload["node_name_to_id"]),
@@ -200,12 +200,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         )
 
     def supports_interaction_strategy(self) -> bool:
-        """Return whether interaction enrichment dependency is available.
-
-        Service-level strategy resolution uses this capability check to apply
-        explicit degradation toward cosine when interaction lookups are absent.
-        Parameters: none.
-        """
+        """Forwarded from the configured external enrichment client."""
 
         return self._external_enrichment_client.supports_interaction_strategy()
 
@@ -217,15 +212,11 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         source_entity_description: str | None = None,
         target_entity_description: str | None = None,
     ) -> RuntimePredictionResult:
-        """Score one existing entity pair using precomputed node embeddings.
-
-        Stage 3 keeps this path intentionally strict because existing-existing
-        scoring is the lowest-latency baseline needed for later API stages.
-        Parameters: source and target names identify one prediction request.
-        """
+        """Resolve two embeddings, cosine similarity, combine enrichment labels."""
 
         source_entity_is_known = self.has_entity_name(entity_name=source_entity_name)
         target_entity_is_known = self.has_entity_name(entity_name=target_entity_name)
+        # Runtime guard; service layer also rejects this case for API contracts.
         if not source_entity_is_known and not target_entity_is_known:
             raise ValueError("Two unseen endpoints are not supported.")
 
@@ -260,12 +251,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         attachment_strategy: str,
         source_entity_description: str | None = None,
     ) -> list[RuntimePredictionResult]:
-        """Score one entity against candidate entities using preload vectors.
-
-        This method remains deterministic and avoids request-time graph work
-        so service tests can validate boundary behaviour with minimal runtime.
-        Parameters: entity names and top_k control ranked output entries.
-        """
+        """Score source against each candidate, sort by score descending, truncate to `top_k`."""
 
         source_vector, source_enrichment_status = self._resolve_entity_embedding(
             entity_name=source_entity_name,
@@ -275,6 +261,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         source_entity_is_known = self.has_entity_name(entity_name=source_entity_name)
         candidate_entity_names_for_scoring = candidate_entity_names
         interaction_lookup_result: InteractionPartnerLookupResult | None = None
+        # Unseen source plus interaction mode: optionally restrict candidates to reported partners.
         if not source_entity_is_known and attachment_strategy == "interaction":
             interaction_lookup_result = (
                 self._external_enrichment_client.lookup_interaction_partners(
@@ -287,6 +274,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
                     interaction_lookup_result=interaction_lookup_result,
                 )
             )
+        # Candidates are assumed known bundle nodes; unseen target handling is pair-specific.
         for candidate_entity_name in candidate_entity_names_for_scoring:
             candidate_vector = self._resolve_existing_entity_embedding(
                 entity_name=candidate_entity_name
@@ -317,17 +305,13 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         scored_candidate_predictions.sort(
             key=lambda prediction_result: prediction_result.score, reverse=True
         )
+        # Service passes `top_k` already bounded; slice enforces ranking window here too.
         return scored_candidate_predictions[:top_k]
 
     def _resolve_existing_entity_embedding(
         self, entity_name: str
     ) -> NDArray[np.float64]:
-        """Resolve one entity name into a precomputed embedding vector.
-
-        Name resolution is explicit here because API-facing entity names differ
-        from node identifiers used by graph arrays and model computations.
-        Parameters: entity_name must map to a known node in the bundle.
-        """
+        """Map display name to internal node id, then to row index, then return that embedding row."""
 
         resolved_node_id = self._node_name_to_node_id[entity_name]
         resolved_node_index = self._node_id_to_index[resolved_node_id]
@@ -339,12 +323,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
     def _resolve_entity_embedding(
         self, entity_name: str, entity_description: str | None
     ) -> tuple[NDArray[np.float64], str]:
-        """Resolve an embedding for known and unseen entity request paths.
-
-        This function uses precomputed vectors for known nodes and a local
-        deterministic text projection for one unseen endpoint in Stage 4.
-        Parameters: entity_name and description define unseen text embedding.
-        """
+        """Known node: precomputed row. Unseen: description, HTTP lookup, or name fallback."""
 
         if self.has_entity_name(entity_name=entity_name):
             return self._resolve_existing_entity_embedding(
@@ -391,12 +370,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
         source_enrichment_status: str,
         target_enrichment_status: str,
     ) -> str:
-        """Resolve enrichment status for pair scoring after embedding resolution.
-
-        This status is returned to API clients so degraded enrichment behaviour
-        is explicit instead of silently blending into normal inference paths.
-        Parameters: source and target statuses come from embedding resolution.
-        """
+        """Pick one summary string from per-endpoint enrichment statuses for pair responses."""
 
         if (
             source_enrichment_status == "not_required"
@@ -419,12 +393,7 @@ class GraphSageInferenceRuntime(InferenceRuntime):
 def _build_model_reconstruction_spec(
     model_architecture: dict[str, int | float | str],
 ) -> GraphSageModelReconstructionSpec:
-    """Build a strongly-typed reconstruction specification from manifest data.
-
-    This conversion isolates parsing concerns so runtime classes receive a
-    stable shape and can enforce exact layer count from startup metadata.
-    Parameters: model_architecture comes from validated bundle metadata.
-    """
+    """Copy manifest `model` dict keys into a dataclass with int or float casts."""
 
     return GraphSageModelReconstructionSpec(
         input_dimension=int(model_architecture["input_dim"]),
@@ -441,12 +410,7 @@ def _filter_candidate_names_from_interactions(
     candidate_entity_names: list[str],
     interaction_lookup_result: InteractionPartnerLookupResult,
 ) -> list[str]:
-    """Filter candidates using interaction partner lookups when available.
-
-    Interaction lookup can reduce candidate pool for attachment strategy use,
-    but this function falls back to original candidates when no overlap exists.
-    Parameters: candidates and lookup results come from runtime scoring flow.
-    """
+    """If partner lookup succeeded, keep only candidates that appear in partner list; else unchanged."""
 
     if interaction_lookup_result.outcome != "success":
         return candidate_entity_names
@@ -466,12 +430,7 @@ def _resolve_unseen_enrichment_status(
     attachment_strategy: str,
     interaction_lookup_result: InteractionPartnerLookupResult | None,
 ) -> str:
-    """Resolve unseen enrichment status text for ranking request responses.
-
-    This function makes degraded interaction and fallback outcomes explicit in
-    API responses so operators can observe enrichment dependency behaviour.
-    Parameters: strategy and optional interaction lookup result define status.
-    """
+    """Refine status when interaction mode was used and base path was degraded text."""
 
     if base_enrichment_status != "degraded_local_text":
         return base_enrichment_status
@@ -489,12 +448,7 @@ def _precompute_base_node_embeddings(
     output_dimension: int,
     attachment_seed: int,
 ) -> NDArray[np.float64]:
-    """Precompute base node embeddings once during startup initialisation.
-
-    A deterministic projection is used for Stage 3 so precompute wiring can be
-    exercised without coupling tests to heavyweight training-side artefacts.
-    Parameters: node_features_array and output_dimension define output matrix.
-    """
+    """Matrix multiply node features by a random Gaussian matrix fixed by `attachment_seed`."""
 
     random_number_generator = np.random.default_rng(seed=attachment_seed)
     projection_matrix = random_number_generator.normal(
@@ -509,12 +463,7 @@ def _precompute_base_node_embeddings(
 def _cosine_similarity(
     source_vector: NDArray[np.float64], target_vector: NDArray[np.float64]
 ) -> float:
-    """Compute cosine similarity score for two embedding vectors.
-
-    Cosine similarity is used because Stage 3 requires a deterministic scoring
-    primitive for existing node comparisons before API prediction endpoints.
-    Parameters: vectors are assumed non-empty and numeric.
-    """
+    """Dot product divided by product of L2 norms (standard cosine similarity)."""
 
     numerator = float(np.dot(source_vector, target_vector))
     denominator = float(np.linalg.norm(source_vector) * np.linalg.norm(target_vector))
@@ -524,12 +473,7 @@ def _cosine_similarity(
 def _build_unseen_entity_embedding(
     entity_text: str, output_dimension: int, attachment_seed: int
 ) -> NDArray[np.float64]:
-    """Build a deterministic embedding vector for one unseen entity text.
-
-    Stage 4 uses this local deterministic vector because external enrichment
-    clients are introduced later while API and runtime boundaries stabilise.
-    Parameters: text content and dimensions define the embedding output.
-    """
+    """Sample one Gaussian vector whose RNG seed depends on `attachment_seed` and character codes."""
 
     deterministic_seed = attachment_seed + sum(
         ord(character) for character in entity_text

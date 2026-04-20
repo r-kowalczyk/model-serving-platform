@@ -75,3 +75,6 @@ dmypy.json
 # Serving bundle
 serving_bundle/
 deployment_journey.md
+
+# Local documentation only (not versioned)
+docs/

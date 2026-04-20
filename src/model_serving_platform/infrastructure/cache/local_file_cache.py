@@ -1,4 +1,21 @@
-"""Local file-backed cache implementation with TTL expiry."""
+"""Disk-backed cache: one JSON file per logical key, with expiry timestamps.
+
+`LocalFileCacheStore` implements the `CacheStore` protocol from `base.py`. Each
+`set` writes a small JSON object to a folder configured at startup (for example
+the service cache path from settings). The file holds the caller's `payload`
+dict plus `expires_at_unix_seconds`, computed as "now plus configured lifetime".
+
+`get` reads that file, parses JSON, and compares current time to the stored
+expiry. If the file is missing, or time is past expiry, `get` returns `None`.
+Expired files are deleted on read so stale entries do not accumulate silently.
+
+Keys are turned into filenames with SHA-256 so arbitrary string keys stay safe
+for the filesystem (no slashes or odd characters in the name). The mapping
+from key to filename is fixed: the same key always maps to the same file.
+
+`current_time_provider` exists so tests can freeze or advance a fake clock without
+waiting for real time to pass.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +29,11 @@ from model_serving_platform.infrastructure.cache.base import CacheEntry, CacheSt
 
 
 class LocalFileCacheStore(CacheStore):
-    """Store cache entries as JSON files under configured directory path.
+    """Concrete `CacheStore` that persists each entry as one JSON file on disk.
 
-    The backend is intentionally simple for v1 because local-first operation
-    requires deterministic behaviour and minimal moving infrastructure parts.
-    Parameters: cache path and TTL values are provided by settings.
+    Suitable for single-process or single-node setups where a shared folder is
+    enough. Not a distributed cache: other machines do not see these files unless
+    they share the same filesystem.
     """
 
     def __init__(
@@ -25,31 +42,27 @@ class LocalFileCacheStore(CacheStore):
         ttl_seconds: float,
         current_time_provider: Callable[[], float] | None = None,
     ) -> None:
-        """Initialise local file cache backend and expiry configuration.
+        """Remember cache folder, entry lifetime in seconds, and optional clock.
 
-        Cache directory is created eagerly to avoid runtime write surprises,
-        and optional clock injection is used for deterministic expiry tests.
-        Parameters: paths and TTL values define file cache behaviour.
+        The directory is created immediately so later `set` calls do not fail
+        only because the folder was never created.
         """
 
         self._cache_directory_path = cache_directory_path
         self._ttl_seconds = ttl_seconds
         self._current_time_provider = current_time_provider or time
+        # Ensure writes succeed without a separate mkdir step on first use.
         self._cache_directory_path.mkdir(parents=True, exist_ok=True)
 
     def get(self, cache_key: str) -> CacheEntry | None:
-        """Return cached payload when present and still within TTL window.
-
-        Expired entries are removed immediately so later reads do not process
-        stale data and cache behaviour remains deterministic across requests.
-        Parameters: cache_key identifies one cached record on disk.
-        """
+        """Return a live `CacheEntry` for `cache_key`, or None if absent or expired."""
 
         cache_file_path = self._get_cache_file_path(cache_key=cache_key)
         if not cache_file_path.exists():
             return None
         cached_entry_payload = json.loads(cache_file_path.read_text(encoding="utf-8"))
         expires_at_unix_seconds = float(cached_entry_payload["expires_at_unix_seconds"])
+        # Drop expired files on read so disk state matches logical cache state.
         if self._current_time_provider() >= expires_at_unix_seconds:
             cache_file_path.unlink(missing_ok=True)
             return None
@@ -60,14 +73,10 @@ class LocalFileCacheStore(CacheStore):
         )
 
     def set(self, cache_key: str, payload: dict[str, object]) -> None:
-        """Write payload to deterministic file path with expiry timestamp.
-
-        Cache writes always overwrite existing records to ensure latest value
-        and expiry are applied after each successful external lookup call.
-        Parameters: cache_key and payload define one cache record write.
-        """
+        """Write `payload` to disk and set expiry to now plus configured lifetime."""
 
         cache_file_path = self._get_cache_file_path(cache_key=cache_key)
+        # Overwrite whole file so each successful lookup refreshes expiry and value.
         cache_file_path.write_text(
             json.dumps(
                 {
@@ -80,13 +89,9 @@ class LocalFileCacheStore(CacheStore):
         )
 
     def _get_cache_file_path(self, cache_key: str) -> Path:
-        """Build deterministic file path for one cache key string.
+        """Map string key to a single file path under the cache directory."""
 
-        Hashing is used to keep filenames filesystem-safe and consistent while
-        preserving deterministic mapping from logical key to storage location.
-        Parameters: cache_key is the logical identifier for cached value.
-        """
-
+        # Hash avoids illegal filename characters and keeps paths predictable.
         cache_file_name = (
             hashlib.sha256(cache_key.encode("utf-8")).hexdigest() + ".json"
         )

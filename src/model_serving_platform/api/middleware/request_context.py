@@ -1,4 +1,11 @@
-"""Request correlation middleware with structured lifecycle logging."""
+"""Middleware that adds per-request tracking and lifecycle observability.
+
+Each HTTP request gets a request identifier from `X-Request-ID` or a generated UUID.
+The identifier is stored in request-scoped logging context and attached to responses.
+The middleware logs request start, completion, status code, and latency values.
+When an unhandled exception occurs, it logs failure and returns a 500 response.
+Optional service metrics are recorded for both successful and failed requests.
+"""
 
 from __future__ import annotations
 

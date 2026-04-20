@@ -1,4 +1,14 @@
-"""Metadata endpoint for startup and bundle visibility."""
+"""Route that returns a plain operational description of the running service.
+
+This module exposes one endpoint, `GET /v1/metadata`, for checks and diagnostics.
+The endpoint does not run model inference and does not read request body inputs.
+Instead, it reads values that were prepared during startup in `request.app.state`.
+Those values are the service version, startup timestamp, and runtime model summary.
+The response also includes GraphSAGE bundle details such as file paths, graph size,
+feature dimension, model architecture, semantic settings, and bundle version.
+This makes it possible to confirm exactly which artefacts and runtime settings are
+active in the current process without opening files on disk or reading container logs.
+"""
 
 from fastapi import APIRouter, Request
 
