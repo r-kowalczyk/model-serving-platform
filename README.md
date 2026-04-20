@@ -1,12 +1,26 @@
 # model-serving-platform
 
-FastAPI service that loads **GraphSAGE** bundles exported by training (see **graph-link-prediction**), validates them at startup, and serves link prediction over HTTP. Training lives elsewhere; this repo is serving, ops glue, and tests.
+A production-shaped FastAPI service that loads **GraphSAGE** bundles exported by training, validates them at startup, reconstructs the encoder in PyTorch, and serves link prediction over HTTP. Training lives in a separate repository; this service is the **serving, operations, and verification** half of that split.
 
-## Bundle and model
+> **Status:** work in progress, deployed to Azure Container Apps for an end-to-end demo. The service is functional against real bundles on CPU; hardening (auth, rate limiting, distributed cache, warm-replica rollout) is on the roadmap.
 
-A bundle directory holds `manifest.json`, `node_features.npy`, `edge_index.npy`, and `model_state.pt`. The loader checks shapes against the manifest. Checkpoints from training are typically a full **GraphSageLinkPredictor** `state_dict`; this service loads **only `encoder.*`** into `TrainingMatchedGraphSageEncoder` (`infrastructure/graphsage/pytorch_encoder.py`), aligned with training’s PyTorch Geometric **SAGEConv** stack. Encoder-only checkpoints (no `encoder.` prefix) are also supported.
+## What it does
 
-At startup the runtime runs **one full-graph encoder forward pass** on **CPU** and keeps all node embeddings in memory. Inference then uses those vectors (with enrichment paths for unseen entities) and **cosine similarity** for scores. Do not duplicate undirected edges in serving: **`edge_index.npy` is used as exported** (training already includes both directions when needed).
+- Loads a versioned **serving bundle** (`manifest.json`, `node_features.npy`, `edge_index.npy`, `model_state.pt`) and refuses to start if anything is missing or mis-shaped.
+- Rebuilds the trained GraphSAGE encoder (`TrainingMatchedGraphSageEncoder`) with **PyTorch Geometric `SAGEConv`** and the same residual layout used in training, loading only the `encoder.*` slice from full link-predictor checkpoints.
+- Runs **one full-graph encoder forward pass on CPU** at startup and keeps the node embeddings in memory.
+- Serves link prediction with **cosine similarity** over those embeddings, with a small rules layer in front (top_k cap, unseen-entity handling, optional enrichment).
+
+## Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | Liveness |
+| `GET /readyz` | Ready only after bundle validation and runtime initialisation |
+| `GET /v1/metadata` | Service, bundle, and model details |
+| `POST /v1/predict-link` | Score a single entity pair |
+| `POST /v1/predict-links` | Rank candidates against one entity |
+| `GET /metrics` | Prometheus exposition (toggle with `MODEL_SERVING_METRICS_ENABLED`) |
 
 ## Run locally
 
@@ -18,14 +32,12 @@ cp .env.example .env
 uv run uvicorn model_serving_platform.api.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-Useful URLs: `/healthz`, `/readyz`, `/v1/metadata`, `/v1/predict-link`, `/v1/predict-links`, `/metrics`.
+The process **fails fast** if `MODEL_SERVING_BUNDLE_PATH` is missing or invalid. See `.env.example` for cache, enrichment, metrics, and restricted-network flags.
 
-The process **fails fast on startup** if `MODEL_SERVING_BUNDLE_PATH` is missing or invalid. Readiness requires successful bundle validation and runtime initialisation. See `.env.example` for behaviour flags (cache, enrichment, metrics, restricted network).
-
-## Checks
+## Quality gates
 
 ```bash
-uv run pytest
+uv run pytest                 # 100% coverage enforced by pre-commit
 uv run ruff check .
 uv run mypy src tests
 ```
@@ -44,22 +56,48 @@ docker run --rm -p 8000:8000 \
   model-serving-platform:local
 ```
 
-Or: `docker compose up --build`. Bundle mount is read-only; cache is writable.
+Or `docker compose up --build`. Bundle mount is read-only; cache is writable.
 
-## Layout
+## Cloud deployment
 
-```text
-.
-├── src/model_serving_platform/
-│   ├── api/ application/ config/ domain/ infrastructure/ main.py
-├── tests/
-├── .env.example
-└── pyproject.toml
+The service has been deployed to **Azure Container Apps** with the bundle mounted from **Azure Files**. The full provisioning and redeploy sequence (including lessons learned) lives in `docs/deployment_guide.md`.
+
+Verify any live instance with:
+
+```bash
+uv run python test_scripts/verify_docker_api.py \
+  --base-url "https://<your-app>.<env>.<region>.azurecontainerapps.io" \
+  --entity-a "<name-in-bundle>" \
+  --entity-b "<name-in-bundle>"
 ```
 
-## v1 limitations
+## Repository layout
 
-GraphSAGE only; synchronous inference in-process; no auth or rate limiting; local cache only; enrichment may run in the request path.
+```text
+src/model_serving_platform/
+  api/              FastAPI factory, routes, middleware
+  application/      Prediction service, runtime protocol
+  infrastructure/   GraphSAGE runtime, bundle loader, cache, enrichment, metrics
+  domain/           Pydantic request/response models
+  config/           Environment-backed settings
+tests/              Unit, service, and smoke tests
+test_scripts/       Standalone cloud verification script
+docs/               Architecture and deployment documentation
+```
+
+## Design notes
+
+- **Split repo:** training produces the bundle; this service consumes it. The bundle is the contract.
+- **Fail-fast startup:** unhealthy bundles never reach request handling.
+- **Protocol-based runtime:** `InferenceRuntime` is a `typing.Protocol`, so HTTP and rules code is unit-testable without torch.
+- **Observability baked in:** structured JSON logs with request IDs, Prometheus metrics, two health endpoints.
+
+## Roadmap (v1 limitations)
+
+- GraphSAGE only; single-process synchronous inference.
+- No authentication, authorisation, or rate limiting.
+- Local file cache only; enrichment may sit in the request path.
+- No warm-replica rollout or A/B traffic split beyond ACA defaults.
 
 ## Licence
 
