@@ -33,6 +33,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
+      - name: Secret scan (gitleaks)
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run pre-commit run gitleaks --all-files
+
       - name: Run nox
         run: uv run nox --pythons ${{ matrix.python-version }}
         shell: bash
