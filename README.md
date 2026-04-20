@@ -99,6 +99,10 @@ docs/               Architecture and deployment documentation
 - Local file cache only; enrichment may sit in the request path.
 - No warm-replica rollout or A/B traffic split beyond ACA defaults.
 
+## Related repository
+
+Training, evaluation, GraphSAGE bundle export, and hybrid embedding pipelines live in **[graph-link-prediction](https://github.com/r-kowalczyk/graph-link-prediction)**.
+
 ## Licence
 
 [MIT](LICENSE)
