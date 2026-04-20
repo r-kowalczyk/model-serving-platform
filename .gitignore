@@ -75,6 +75,9 @@ dmypy.json
 # Serving bundle
 deployment_journey.md
 
+# Rendered Azure Container Apps manifest (contains live ACR password)
+app.rendered.yaml
+
 # Local documentation only (not versioned)
 docs/
 bundles/

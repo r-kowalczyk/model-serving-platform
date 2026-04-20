@@ -1,3 +1,10 @@
+# Template manifest for Azure Container Apps. The ACR admin password is not
+# baked in; render this file with `envsubst` after exporting ACR_PASSWORD
+# (see docs/deployment_guide.md section 4 for how to fetch it), for example:
+#   envsubst < app.yaml > app.rendered.yaml
+#   az containerapp update --name "$APP_NAME" \
+#     --resource-group "$RESOURCE_GROUP" --yaml app.rendered.yaml
+# The rendered file contains the live secret and must not be committed.
 location: uksouth
 properties:
   managedEnvironmentId: /subscriptions/d2d3a181-bea8-425b-bacd-cbfb7fb5dfef/resourceGroups/rg-model-serving-platform/providers/Microsoft.App/managedEnvironments/aca-env-model-serving
@@ -12,7 +19,7 @@ properties:
         passwordSecretRef: acr-password
     secrets:
       - name: acr-password
-        value: 1VyQIgbmB777Hln601QzwYWm4yEIXXUGgnwUE8V7fpI3EiZ7PR8AJQQJ99CCACmepeSEqg7NAAACAZCRaEui
+        value: ${ACR_PASSWORD}
   template:
     containers:
       - name: graphsage-serving-api
