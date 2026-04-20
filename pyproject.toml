@@ -11,6 +11,8 @@ dependencies = [
     "prometheus-client>=0.23.1",
     "pydantic>=2.11.9",
     "pydantic-settings>=2.11.0",
+    "torch>=2.4.0",
+    "torch-geometric>=2.6.0",
     "uvicorn>=0.35.0",
 ]
 
@@ -41,4 +43,7 @@ line-length = 88
 [tool.mypy]
 strict = true
 
+[[tool.mypy.overrides]]
+module = ["torch_geometric.*"]
+ignore_missing_imports = true
 

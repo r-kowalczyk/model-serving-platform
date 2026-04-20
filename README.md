@@ -1,75 +1,14 @@
 # model-serving-platform
 
-Production-style GraphSAGE model serving system focused on loading and serving versioned bundles exported by an external training repository.
+FastAPI service that loads **GraphSAGE** bundles exported by training (see **graph-link-prediction**), validates them at startup, and serves link prediction over HTTP. Training lives elsewhere; this repo is serving, ops glue, and tests.
 
-## Purpose
+## Bundle and model
 
-This repository is deliberately separate from model training code.
+A bundle directory holds `manifest.json`, `node_features.npy`, `edge_index.npy`, and `model_state.pt`. The loader checks shapes against the manifest. Checkpoints from training are typically a full **GraphSageLinkPredictor** `state_dict`; this service loads **only `encoder.*`** into `TrainingMatchedGraphSageEncoder` (`infrastructure/graphsage/pytorch_encoder.py`), aligned with training’s PyTorch Geometric **SAGEConv** stack. Encoder-only checkpoints (no `encoder.` prefix) are also supported.
 
-- Upstream repository: trains models and exports GraphSAGE serving bundles.
-- This repository: validates bundles, loads runtime dependencies, and serves inference endpoints.
+At startup the runtime runs **one full-graph encoder forward pass** on **CPU** and keeps all node embeddings in memory. Inference then uses those vectors (with enrichment paths for unseen entities) and **cosine similarity** for scores. Do not duplicate undirected edges in serving: **`edge_index.npy` is used as exported** (training already includes both directions when needed).
 
-Version 1 is GraphSAGE-only by design.
-
-## Stage 10 status
-
-Stage 10 adds integration smoke coverage and final v1 cleanup notes.
-
-Included in this stage now:
-
-- FastAPI application factory and entrypoint.
-- Environment-based settings using `pydantic-settings`.
-- `GET /healthz` liveness endpoint.
-- `GET /readyz` readiness endpoint that is true only after bundle validation succeeds.
-- `GET /v1/metadata` endpoint exposing loaded bundle metadata and model backend details.
-- `POST /v1/predict-link` endpoint for one pair score response.
-- `POST /v1/predict-links` endpoint for ranked candidate score responses.
-- structured JSON logging with request correlation context.
-- `X-Request-ID` propagation for all HTTP responses.
-- request lifecycle logs for receive, complete, and failure paths.
-- external enrichment client abstraction and concrete HTTP implementation.
-- configurable timeout, retry count, and bounded backoff for HTTP enrichment calls.
-- explicit restricted-network mode that requires caller descriptions for unseen entities.
-- explicit interaction-strategy degradation to cosine when interaction lookup is unavailable.
-- cache abstraction with local file-backed cache implementation.
-- deterministic cache keys for description and interaction lookup requests.
-- configurable cache path and TTL for placing writable cache outside bundle directory.
-- request count and latency metrics by endpoint and status.
-- prediction, external lookup, cache event, and fallback usage counters.
-- `GET /metrics` endpoint with explicit disabled-mode behaviour.
-- multi-stage Dockerfile with slim runtime image.
-- non-root container runtime user.
-- container healthcheck for `/healthz`.
-- local `compose.yaml` with read-only bundle mount and writable cache mount.
-- CI-friendly smoke path that boots app and exercises happy endpoints.
-- runtime boundary with `InferenceRuntime` protocol and GraphSAGE runtime implementation.
-- startup precompute of base node embeddings and runtime summary metadata.
-- fake runtime fixtures used by service-layer tests for deterministic behaviour.
-- Package structure for API, application, domain, infrastructure, and config layers.
-- GraphSAGE bundle loader that validates:
-  - required files
-  - manifest schema keys
-  - `node_features.npy` input dimension against `manifest.model.input_dim`
-  - `edge_index.npy` first dimension equals `2`
-
-## Current directory layout
-
-```text
-.
-├── src/
-│   └── model_serving_platform/
-│       ├── api/
-│       ├── application/
-│       ├── config/
-│       ├── domain/
-│       ├── infrastructure/
-│       └── main.py
-├── tests/
-├── .env.example
-└── pyproject.toml
-```
-
-## Local development quick start
+## Run locally
 
 ```bash
 uv venv
@@ -79,26 +18,11 @@ cp .env.example .env
 uv run uvicorn model_serving_platform.api.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-Then check:
+Useful URLs: `/healthz`, `/readyz`, `/v1/metadata`, `/v1/predict-link`, `/v1/predict-links`, `/metrics`.
 
-- `GET http://localhost:8000/healthz`
-- `GET http://localhost:8000/readyz`
-- `GET http://localhost:8000/v1/metadata`
-- `POST http://localhost:8000/v1/predict-link`
-- `POST http://localhost:8000/v1/predict-links`
+The process **fails fast on startup** if `MODEL_SERVING_BUNDLE_PATH` is missing or invalid. Readiness requires successful bundle validation and runtime initialisation. See `.env.example` for behaviour flags (cache, enrichment, metrics, restricted network).
 
-Important startup rule:
-
-- The service fails fast on startup if `MODEL_SERVING_BUNDLE_PATH` does not point to a valid GraphSAGE bundle directory.
-- Readiness depends on both successful bundle validation and runtime initialisation.
-- Pair predictions reject requests where both endpoints are unseen in v1.
-- Prediction responses include request identifiers that align with request correlation headers.
-- Restricted-network mode requires caller-provided descriptions for unseen entities.
-- External enrichment failures are handled with explicit degraded fallback status values.
-- Enrichment lookups are cached with deterministic keys and TTL-based expiry.
-- Metrics collection can be enabled or disabled through environment settings.
-
-## Quality checks
+## Checks
 
 ```bash
 uv run pytest
@@ -106,54 +30,36 @@ uv run ruff check .
 uv run mypy src tests
 ```
 
-Run a focused smoke path:
+Focused smoke: `uv run pytest tests/test_smoke_happy_path.py`.
+
+## Docker
 
 ```bash
-uv run pytest tests/test_smoke_happy_path.py
-```
-
-## Docker runtime
-
-Build and run with Docker:
-
-```bash
-docker build -t model-serving-platform:stage9 .
+docker build -t model-serving-platform:local .
 docker run --rm -p 8000:8000 \
   -e MODEL_SERVING_BUNDLE_PATH=/app/bundles/graphsage \
   -e MODEL_SERVING_CACHE_PATH=/app/cache \
   -v "$(pwd)/bundles/graphsage:/app/bundles/graphsage:ro" \
   -v "$(pwd)/cache:/app/cache" \
-  model-serving-platform:stage9
+  model-serving-platform:local
 ```
 
-Run with Compose:
+Or: `docker compose up --build`. Bundle mount is read-only; cache is writable.
 
-```bash
-docker compose up --build
+## Layout
+
+```text
+.
+├── src/model_serving_platform/
+│   ├── api/ application/ config/ domain/ infrastructure/ main.py
+├── tests/
+├── .env.example
+└── pyproject.toml
 ```
 
-Container operation notes:
+## v1 limitations
 
-- Bundle mount is read-only and treated as immutable model artefact storage.
-- Cache path is writable and kept separate from bundle files.
-- Healthcheck uses `GET /healthz`.
-- Startup still fails fast if bundle validation fails.
-
-## Production-style scope statement
-
-This project demonstrates production-style serving engineering patterns.
-It is not presented as fully production-ready at Stage 10.
-
-## Explicit v1 limitations
-
-- GraphSAGE-only support in v1.
-- Synchronous request-time inference only.
-- Local runtime components only.
-- No authentication or authorisation.
-- No rate limiting.
-- No distributed cache.
-- No asynchronous job queue.
-- External enrichment can remain in request path.
+GraphSAGE only; synchronous inference in-process; no auth or rate limiting; local cache only; enrichment may run in the request path.
 
 ## Licence
 

@@ -4,21 +4,23 @@
 provides `GraphSageInferenceRuntime`, the real implementation for this project.
 
 Startup factory `from_loaded_bundle_metadata` reads `manifest.json` again from
-disk, loads `node_features.npy`, builds a small typed spec from manifest model
-fields, and precomputes one embedding vector per graph node. That precompute step
-uses a fixed random projection (seeded from the bundle) so tests stay stable; it
-is not the full trained GraphSAGE forward pass, but it gives consistent vectors
-for cosine scoring.
+disk, loads `node_features.npy` and `edge_index.npy`, reconstructs the PyTorch
+encoder defined in `pytorch_encoder.py`, loads weights from `model_state.pt`,
+and runs one full forward pass to produce one embedding row per graph node.
+
+Bundle `edge_index.npy` must match what training exported: graph-link-prediction
+already stores both directions per undirected edge when `is_undirected` is true,
+so the runtime uses the array as-is without duplicating edges again.
 
 At request time the runtime resolves each entity name to a vector: known names
-use the precomputed row; unseen names use caller text, external description
+use the forward-pass row; unseen names use caller text, external description
 lookup, or a degraded hash of the name, depending on mode and inputs. Pair and
 ranking methods then use cosine similarity between vectors. Interaction strategy
 can narrow ranking candidates using external partner lists when the source is
 unseen.
 
-Module-level helpers at the bottom of the file implement projection, cosine,
-unseen text embeddings, candidate filtering, and enrichment status labelling.
+Module-level helpers at the bottom implement cosine similarity, unseen text
+embeddings, candidate filtering, and enrichment status labelling.
 """
 
 from __future__ import annotations
@@ -44,6 +46,10 @@ from model_serving_platform.infrastructure.clients.enrichment import (
     ExternalEnrichmentClient,
     InteractionPartnerLookupResult,
     NoopExternalEnrichmentClient,
+)
+from model_serving_platform.infrastructure.graphsage.pytorch_encoder import (
+    build_encoder_and_load_weights,
+    encode_all_nodes,
 )
 
 graph_sage_runtime_logger = logging.getLogger(
@@ -159,12 +165,24 @@ class GraphSageInferenceRuntime(InferenceRuntime):
             model_architecture=loaded_bundle_metadata.model_architecture
         )
 
-        # Linear projection with a seeded RNG: fixed vectors per node for cosine scoring in this codebase.
+        # Full GraphSAGE forward on the exported graph using weights from model_state.pt.
         embedding_precomputation_start_timestamp = perf_counter()
-        precomputed_node_embeddings = _precompute_base_node_embeddings(
-            node_features_array=node_features_array,
+        edge_index_array = np.asarray(
+            np.load(loaded_bundle_metadata.edge_index_path),
+            dtype=np.int64,
+        )
+        encoder_module = build_encoder_and_load_weights(
+            model_state_path=loaded_bundle_metadata.model_state_path,
+            input_dimension=model_reconstruction_spec.input_dimension,
+            hidden_dimension=model_reconstruction_spec.hidden_dimension,
             output_dimension=model_reconstruction_spec.output_dimension,
-            attachment_seed=loaded_bundle_metadata.attachment_seed,
+            num_layers=model_reconstruction_spec.num_layers,
+            dropout_probability=model_reconstruction_spec.dropout,
+        )
+        precomputed_node_embeddings = encode_all_nodes(
+            encoder_module=encoder_module,
+            node_feature_matrix=node_features_array,
+            edge_index_array=edge_index_array,
         )
         embedding_precomputation_elapsed_milliseconds = int(
             (perf_counter() - embedding_precomputation_start_timestamp) * 1000
@@ -441,23 +459,6 @@ def _resolve_unseen_enrichment_status(
     if interaction_lookup_result.outcome == "success":
         return "interaction_lookup"
     return "interaction_lookup_failed_fallback"
-
-
-def _precompute_base_node_embeddings(
-    node_features_array: NDArray[np.float64] | NDArray[np.float32],
-    output_dimension: int,
-    attachment_seed: int,
-) -> NDArray[np.float64]:
-    """Matrix multiply node features by a random Gaussian matrix fixed by `attachment_seed`."""
-
-    random_number_generator = np.random.default_rng(seed=attachment_seed)
-    projection_matrix = random_number_generator.normal(
-        loc=0.0,
-        scale=0.1,
-        size=(node_features_array.shape[1], output_dimension),
-    )
-    precomputed_node_embeddings = node_features_array @ projection_matrix
-    return np.asarray(precomputed_node_embeddings, dtype=np.float64)
 
 
 def _cosine_similarity(

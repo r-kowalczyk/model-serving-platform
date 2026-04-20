@@ -6,6 +6,11 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
+
+from model_serving_platform.infrastructure.graphsage.pytorch_encoder import (
+    TrainingMatchedGraphSageEncoder,
+)
 
 
 def write_valid_bundle(bundle_directory_path: Path) -> Path:
@@ -17,7 +22,18 @@ def write_valid_bundle(bundle_directory_path: Path) -> Path:
     """
 
     bundle_directory_path.mkdir(parents=True, exist_ok=True)
-    (bundle_directory_path / "model_state.pt").write_bytes(b"stage2-placeholder-state")
+    torch.manual_seed(42)
+    encoder_module = TrainingMatchedGraphSageEncoder(
+        input_dimension=4,
+        hidden_dimension=8,
+        output_dimension=4,
+        dropout_rate=0.1,
+        num_layers=2,
+    )
+    torch.save(
+        encoder_module.state_dict(),
+        bundle_directory_path / "model_state.pt",
+    )
     manifest_data = {
         "bundle_version": "test-bundle-v1",
         "node_id_to_index": {"N1": 0, "N2": 1, "N3": 2},
@@ -54,10 +70,11 @@ def write_valid_bundle(bundle_directory_path: Path) -> Path:
             dtype=np.float32,
         ),
     )
-    np.save(
-        bundle_directory_path / "edge_index.npy",
-        np.asarray([[0, 1, 2], [1, 2, 0]], dtype=np.int64),
-    )
+    # Align with graph-link-prediction: undirected graphs store both directions for PyG message passing.
+    base_edge_pairs = [(0, 1), (1, 2), (2, 0)]
+    reversed_edge_pairs = [(target, source) for source, target in base_edge_pairs]
+    edge_pair_array = np.asarray(base_edge_pairs + reversed_edge_pairs, dtype=np.int64)
+    np.save(bundle_directory_path / "edge_index.npy", edge_pair_array.T)
     (bundle_directory_path / "resolver_cache.json").write_text("{}", encoding="utf-8")
     (bundle_directory_path / "interaction_cache.json").write_text(
         "{}", encoding="utf-8"

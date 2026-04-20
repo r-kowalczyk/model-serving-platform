@@ -34,7 +34,7 @@ def test_loader_returns_metadata_for_valid_bundle(tmp_path: Path) -> None:
 
     assert loaded_bundle_metadata.node_count == 3
     assert loaded_bundle_metadata.feature_dimension == 4
-    assert loaded_bundle_metadata.edge_count == 3
+    assert loaded_bundle_metadata.edge_count == 6
     assert loaded_bundle_metadata.model_architecture["num_layers"] == 2
 
 

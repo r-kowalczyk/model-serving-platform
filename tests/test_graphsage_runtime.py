@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from model_serving_platform.infrastructure.bundles.loader import GraphSageBundleLoader
 from model_serving_platform.infrastructure.clients.enrichment import (
@@ -85,6 +86,40 @@ class StaticExternalEnrichmentClient(ExternalEnrichmentClient):
         """
 
         return self._supports_interaction
+
+
+def test_runtime_loads_encoder_prefixed_checkpoint_like_training_export(
+    tmp_path: Path,
+) -> None:
+    """Ensure full-model checkpoints from graph-link-prediction (`encoder.*` keys) load.
+
+    Training saves `torch.save(model.state_dict())` for `GraphSageLinkPredictor`, so
+    tensor keys carry an `encoder.` prefix that serving code must strip.
+    """
+
+    bundle_directory_path = write_valid_bundle(tmp_path / "prefixed-bundle")
+    encoder_only_state = torch.load(
+        bundle_directory_path / "model_state.pt",
+        map_location=torch.device("cpu"),
+        weights_only=True,
+    )
+    prefixed_state = {
+        "encoder." + tensor_key: tensor_value
+        for tensor_key, tensor_value in encoder_only_state.items()
+    }
+    torch.save(prefixed_state, bundle_directory_path / "model_state.pt")
+
+    loaded_bundle_metadata = GraphSageBundleLoader().load_and_validate_bundle(
+        bundle_directory_path=bundle_directory_path
+    )
+    graph_sage_inference_runtime = (
+        GraphSageInferenceRuntime.from_loaded_bundle_metadata(
+            loaded_bundle_metadata=loaded_bundle_metadata,
+        )
+    )
+
+    assert graph_sage_inference_runtime.initialisation_summary.is_ready is True
+    assert graph_sage_inference_runtime.initialisation_summary.base_embedding_count == 3
 
 
 def test_runtime_initialises_from_loaded_bundle_metadata(tmp_path: Path) -> None:
