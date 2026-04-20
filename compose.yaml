@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: model-serving-platform:stage9
+    image: model-serving-platform:local
     ports:
       - "8000:8000"
     environment:
