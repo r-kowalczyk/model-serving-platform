@@ -1,6 +1,6 @@
 # model-serving-platform
 
-A production-shaped FastAPI service that loads **GraphSAGE** bundles exported by training, validates them at startup, reconstructs the encoder in PyTorch, and serves link prediction over HTTP. Training lives in a separate repository; this service is the **serving, operations, and verification** half of that split.
+A production-shaped FastAPI service that loads **GraphSAGE** bundles exported by training, validates them at startup, reconstructs the encoder in PyTorch, and serves link prediction over HTTP. Training and bundle export live in **[graph-link-prediction](https://github.com/r-kowalczyk/graph-link-prediction)** (biomedical link prediction with hybrid embeddings and a GraphSAGE serving path); this repository is the **serving, operations, and verification** half of that split.
 
 > **Status:** work in progress, deployed to Azure Container Apps for an end-to-end demo. The service is functional against real bundles on CPU; hardening (auth, rate limiting, distributed cache, warm-replica rollout) is on the roadmap.
 
